@@ -16,7 +16,7 @@ from difflib import SequenceMatcher, get_close_matches
 
 # --- Paths ---
 DB_PATH = os.path.join(os.path.dirname(__file__), "interactions.db")
-SE_DB_DIR = r"C:\Users\andew\OneDrive\Documents\Drug_SE_DB"
+SE_DB_DIR = os.path.join(os.path.dirname(__file__), "..", "Drug_SE_DB")
 DRUG_NAMES_TSV = os.path.join(SE_DB_DIR, "drug_names.tsv")
 OUTPUT_CSV = os.path.join(os.path.dirname(__file__), "cid_to_ddinter.csv")
 
