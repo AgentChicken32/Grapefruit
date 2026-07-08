@@ -128,6 +128,32 @@ echo "TODO - this check was buggy, for now we assume npm is there"
 :: echo Houston, we did a check
 
 :: ------------------------------------------------------------
+:: STEP 3b -- Build drug mapping if not already done
+:: ------------------------------------------------------------
+echo.
+if not exist "%BACKEND%\cid_to_ddinter.csv" (
+    echo [SETUP] cid_to_ddinter.csv not found -- running build_drug_mapping.py ...
+    "%VENV%\Scripts\python.exe" "%BACKEND%\build_drug_mapping.py"
+    if errorlevel 1 ( echo  ERROR: build_drug_mapping.py failed. & goto :fail )
+    echo  OK -- drug mapping built.
+) else (
+    echo [SETUP] cid_to_ddinter.csv already exists -- skipping mapping.
+)
+
+:: ------------------------------------------------------------
+:: STEP 3c -- Import side effects if not already done
+:: ------------------------------------------------------------
+"%VENV%\Scripts\python.exe" -c "import sqlite3; conn=sqlite3.connect('%BACKEND%\interactions.db'); r=conn.execute(\"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='side_effects'\").fetchone(); exit(0 if r[0]>0 else 1)"
+if errorlevel 1 (
+    echo [SETUP] side_effects table not found -- running import_side_effects.py ...
+    "%VENV%\Scripts\python.exe" "%BACKEND%\import_side_effects.py"
+    if errorlevel 1 ( echo  ERROR: import_side_effects.py failed. & goto :fail )
+    echo  OK -- side effects imported.
+) else (
+    echo [SETUP] side_effects table already exists -- skipping import.
+)
+
+:: ------------------------------------------------------------
 :: STEP 4 -- Launch frontend
 :: ------------------------------------------------------------
 echo [START] Launching frontend window...
