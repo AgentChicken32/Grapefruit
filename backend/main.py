@@ -25,6 +25,9 @@ FOOD_CSV_PATH     = os.environ.get("FOOD_CSV",     "drug_food.csv")
 DISEASE_CSV_PATH  = os.environ.get("DISEASE_CSV",  "drug_disease.csv")
 DB_PATH           = os.environ.get("DRUG_DB",      "interactions.db")
 SIMILARITY_CUTOFF = float(os.environ.get("SIM_CUTOFF", "0.90"))
+# Weight given to side-effect burden vs drug-drug interaction strength (0–1).
+# 0.0 = interactions only, 1.0 = side effects only.
+SE_WEIGHT = float(os.environ.get("SE_WEIGHT", "0.25"))
 
 # ---------------------------------------------------------------------------
 # DB helpers
@@ -311,6 +314,32 @@ def drug_avg_strength(conn: sqlite3.Connection, drug_id: str, regime_ids: list[s
     return row["avg_s"]
 
 
+def blended_drug_risk(
+    interaction_strength: float | None,
+    se_burden: float | None,
+    se_weight: float = SE_WEIGHT,
+) -> float:
+    """
+    Blend interaction strength (0–3 scale) with side-effect burden (0–1 scale,
+    normalised to 0–3) using se_weight.  Missing values default to 0.
+    """
+    interaction = interaction_strength if interaction_strength is not None else 0.0
+    # Normalise SE burden from [0,1] to [0,3] to match interaction scale
+    se = (se_burden * 3.0) if se_burden is not None else 0.0
+    return (1.0 - se_weight) * interaction + se_weight * se
+
+
+def calc_normalized_risk(conn: sqlite3.Connection, drug_ids: list[str]) -> float | None:
+    if not drug_ids:
+        return None
+    risks = []
+    for did in drug_ids:
+        strength = drug_avg_strength(conn, did, regime_ids=drug_ids)
+        burden   = drug_se_burden(conn, did)
+        risks.append(blended_drug_risk(strength, burden))
+    return sum(risks) / len(risks)
+
+
 def pair_has_interaction(conn: sqlite3.Connection, id_a: str, id_b: str) -> bool:
     num_a, num_b = _id_to_num(id_a), _id_to_num(id_b)
     row = conn.execute(
@@ -552,6 +581,57 @@ def get_disease_interactions(conn: sqlite3.Connection, drug_id: str) -> list[dic
     return [dict(r) for r in rows]
 
 
+def drug_se_burden(conn: sqlite3.Connection, drug_id: str) -> float | None:
+    """
+    Returns the average freq_upper across all side effects for this drug (0–1 scale).
+    Entries without a known frequency are excluded.  Returns None if no data exists.
+    """
+    drug_num = _id_to_num(drug_id)
+    row = conn.execute(
+        """
+        SELECT AVG(freq_upper) AS burden
+        FROM side_effects
+        WHERE ddinter_num = ? AND freq_upper IS NOT NULL
+        """,
+        (drug_num,),
+    ).fetchone()
+    return row["burden"] if row and row["burden"] is not None else None
+
+
+def get_side_effects(
+    conn: sqlite3.Connection,
+    drug_id: str,
+    limit: int = 50,
+) -> list[dict]:
+    """Return side effects for a drug ordered by descending frequency upper bound."""
+    drug_num = _id_to_num(drug_id)
+    rows = conn.execute(
+        """
+        SELECT se_name, freq_lower, freq_upper, freq_label
+        FROM side_effects
+        WHERE ddinter_num = ?
+          AND (freq_upper IS NULL OR freq_upper > 0)
+          AND (freq_lower IS NULL OR freq_lower > 0)
+        ORDER BY
+          CASE freq_label
+            WHEN 'very common'   THEN 10
+            WHEN 'common'        THEN 20
+            WHEN 'frequent'      THEN 30
+            WHEN 'uncommon'      THEN 40
+            WHEN 'infrequent'    THEN 50
+            WHEN 'rare'          THEN 60
+            WHEN 'very rare'     THEN 70
+            ELSE 80
+          END,
+          freq_lower DESC NULLS LAST,
+          se_name ASC
+        LIMIT ?
+        """,
+        (drug_num, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -584,10 +664,11 @@ class RegimeRequest(BaseModel):
 
 
 class DrugRisk(BaseModel):
-    id: str
-    name: str
+    id:           str
+    name:         str
     avg_strength: float | None
-    risk: float
+    se_burden:    float | None  # avg side-effect frequency, 0-1 scale
+    risk:         float         # blended score on 0-3 scale
 
 
 class PairScore(BaseModel):
@@ -604,6 +685,7 @@ class ReplacementCandidate(BaseModel):
     name:              str
     score:             float
     interaction_count: int
+    substitute_risk:   float | None
 
 
 class DrugReplacements(BaseModel):
@@ -639,10 +721,24 @@ class DrugDiseaseInteractions(BaseModel):
     diseases:  list[DiseaseInteraction]
 
 
+class SideEffect(BaseModel):
+    se_name:    str
+    freq_lower: float | None
+    freq_upper: float | None
+    freq_label: str | None
+
+
+class DrugSideEffects(BaseModel):
+    drug_id:      str
+    drug_name:    str
+    side_effects: list[SideEffect]
+
+
 class RegimeResponse(BaseModel):
     drugs:                list[DrugRisk]
     total_risk:           float
     normalized_risk:      float
+    se_weight:            float
     populated_edges:      int
     possible_edges:       int
     coverage_pct:         float
@@ -651,6 +747,7 @@ class RegimeResponse(BaseModel):
     similar_replacements: list[DrugReplacements]
     food_interactions:    list[DrugFoodInteractions]
     disease_interactions: list[DrugDiseaseInteractions]
+    side_effects:         list[DrugSideEffects]
 
 
 # ---------------------------------------------------------------------------
@@ -678,6 +775,23 @@ def search(q: str, limit: int = 10):
         conn.close()
 
 
+@app.get("/drugs/{drug_id}/side_effects", response_model=DrugSideEffects)
+def drug_side_effects(drug_id: str, limit: int = 50):
+    conn = get_conn()
+    try:
+        drug = resolve_drug(conn, drug_id)
+        if not drug:
+            raise HTTPException(status_code=404, detail=f"Drug '{drug_id}' not found")
+        effects = get_side_effects(conn, drug["id"], limit=limit)
+        return DrugSideEffects(
+            drug_id=drug["id"],
+            drug_name=drug["name"],
+            side_effects=[SideEffect(**e) for e in effects],
+        )
+    finally:
+        conn.close()
+
+
 @app.post("/regime/risk", response_model=RegimeResponse)
 def regime_risk(req: RegimeRequest):
     if not req.drug_ids:
@@ -699,13 +813,15 @@ def regime_risk(req: RegimeRequest):
         resolved_ids = [d["id"] for d in resolved]
         drug_risks: list[DrugRisk] = []
         for drug in resolved:
-            avg = drug_avg_strength(conn, drug["id"], regime_ids=resolved_ids)
-            risk_val = avg if avg is not None else 0.0
+            avg     = drug_avg_strength(conn, drug["id"], regime_ids=resolved_ids)
+            burden  = drug_se_burden(conn, drug["id"])
+            risk_val = blended_drug_risk(avg, burden)
             drug_risks.append(DrugRisk(
                 id=drug["id"],
                 name=drug["name"],
                 avg_strength=avg,
-                risk=risk_val,
+                se_burden=round(burden, 4) if burden is not None else None,
+                risk=round(risk_val, 4),
             ))
 
         total_risk = sum(d.risk for d in drug_risks)
@@ -752,11 +868,23 @@ def regime_risk(req: RegimeRequest):
                 (drug_num, drug_num),
             ).fetchone()
             orig_count = orig_count_row["cnt"] if orig_count_row else 0
+
+            # For each candidate, compute regime risk with this drug swapped out
+            substitute_regime = [rid for rid in resolved_ids if rid != drug["id"]]
+            replacement_objects: list[ReplacementCandidate] = []
+            for c in candidates:
+                sub_ids = substitute_regime + [c["id"]]
+                sub_risk = calc_normalized_risk(conn, sub_ids)
+                replacement_objects.append(ReplacementCandidate(
+                    **c,
+                    substitute_risk=round(sub_risk, 6) if sub_risk is not None else None,
+                ))
+
             similar_replacements.append(DrugReplacements(
                 drug_id=drug["id"],
                 drug_name=drug["name"],
                 original_interaction_count=orig_count,
-                replacements=[ReplacementCandidate(**c) for c in candidates],
+                replacements=replacement_objects,
             ))
 
         food_interactions: list[DrugFoodInteractions] = []
@@ -777,10 +905,20 @@ def regime_risk(req: RegimeRequest):
                 diseases=[DiseaseInteraction(**d) for d in diseases],
             ))
 
+        side_effects: list[DrugSideEffects] = []
+        for drug in resolved:
+            effects = get_side_effects(conn, drug["id"])
+            side_effects.append(DrugSideEffects(
+                drug_id=drug["id"],
+                drug_name=drug["name"],
+                side_effects=[SideEffect(**e) for e in effects],
+            ))
+
         return RegimeResponse(
             drugs=drug_risks,
             total_risk=total_risk,
             normalized_risk=round(normalized_risk, 6),
+            se_weight=SE_WEIGHT,
             populated_edges=populated,
             possible_edges=possible,
             coverage_pct=round(coverage, 1),
@@ -789,6 +927,7 @@ def regime_risk(req: RegimeRequest):
             similar_replacements=similar_replacements,
             food_interactions=food_interactions,
             disease_interactions=disease_interactions,
+            side_effects=side_effects,
         )
     finally:
         conn.close()
