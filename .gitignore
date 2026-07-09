@@ -9,6 +9,9 @@ __pycache__/
 # Database (rebuilt from CSV on each run)
 *.db
 
+# Side effect stuff
+Drug_SE_DB/
+
 # Frontend
 node_modules/
 dist/

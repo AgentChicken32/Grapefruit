@@ -704,50 +704,6 @@ export default function App() {
               </tbody>
             </table>
 
-            {/* Pairwise matching scores */}
-            {result.pair_scores?.length > 0 && (
-              <>
-                <p className="section-title">Pairwise Matching Scores</p>
-                <table className="data-table">
-                  <thead>
-                    <tr><th>Drug Pair</th><th>Mechanism</th><th className="right">Matching Score</th></tr>
-                  </thead>
-                  <tbody>
-                    {result.pair_scores.map((ps, i) => {
-                      const s = ps.score;
-                      const color = s !== null ? scoreColor(s) : "var(--muted)";
-                      return (
-                        <tr key={i}>
-                          <td>
-                            <div className="pair-names">
-                              <span>{ps.drug_a_name}</span>
-                              <span className="pair-sep">↔</span>
-                              <span>{ps.drug_b_name}</span>
-                            </div>
-                          </td>
-                          <td>
-                            {ps.mechanism
-                              ? <span className="mech-badge">{ps.mechanism}</span>
-                              : <span className="no-data">—</span>}
-                          </td>
-                          <td className="repl-score-cell">
-                            {s !== null ? (
-                              <div className="bar-wrap">
-                                <div className="bar">
-                                  <div className="bar-fill" style={{ width: `${s * 100}%`, background: color }} />
-                                </div>
-                                <span className="bar-label" style={{ color }}>{(s * 100).toFixed(1)}%</span>
-                              </div>
-                            ) : <span className="no-data">no data</span>}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </>
-            )}
-
             {/* Similar replacement suggestions */}
             {result.similar_replacements?.length > 0 && (
               <>
