@@ -545,7 +545,7 @@ export default function App() {
   const diseaseMap = result ? Object.fromEntries(result.disease_interactions?.map(g => [g.drug_id, g]) ?? []) : {};
   const seMap      = result ? Object.fromEntries(result.side_effects?.map(g => [g.drug_id, g]) ?? []) : {};
 
-  const openModal = (drug, type) => setModal({ drug, type });
+  const openModal = (drug, type, candidateData = null) => setModal({ drug, type, candidateData });
   const closeModal = () => setModal(null);
 
   return (
@@ -721,7 +721,7 @@ export default function App() {
                           <tr>
                             <th>Replacement Drug</th>
                             <th>ID</th>
-                            <th className="right">Interactions (original: {group.original_interaction_count.toLocaleString()})</th>
+                            <th>Interactions</th>
                             <th className="right">Match Score</th>
                             <th className="right">Regime Risk if Substituted</th>
                           </tr>
@@ -735,7 +735,40 @@ export default function App() {
                               <tr key={r.id}>
                                 <td className="repl-name">{r.name}</td>
                                 <td className="repl-id">{r.id}</td>
-                                <td className="repl-count">{r.interaction_count.toLocaleString()}</td>
+                                <td>
+                                  <div className="drug-row-buttons">
+                                    {r.foods.length > 0 ? (
+                                      <button
+                                        className={`btn-pill food${modal?.drug.id === r.id && modal?.type === "food" ? " active" : ""}`}
+                                        onClick={() => openModal(r, "food", r)}
+                                      >
+                                        🍽 {r.foods.length} food
+                                      </button>
+                                    ) : (
+                                      <span className="btn-pill none-badge">🍽 none</span>
+                                    )}
+                                    {r.diseases.length > 0 ? (
+                                      <button
+                                        className={`btn-pill disease${modal?.drug.id === r.id && modal?.type === "disease" ? " active" : ""}`}
+                                        onClick={() => openModal(r, "disease", r)}
+                                      >
+                                        🩺 {r.diseases.length} disease
+                                      </button>
+                                    ) : (
+                                      <span className="btn-pill none-badge">🩺 none</span>
+                                    )}
+                                    {r.side_effects.length > 0 ? (
+                                      <button
+                                        className={`btn-pill side-effects${modal?.drug.id === r.id && modal?.type === "side-effects" ? " active" : ""}`}
+                                        onClick={() => openModal(r, "side-effects", r)}
+                                      >
+                                        💊 {r.side_effects.length} SE
+                                      </button>
+                                    ) : (
+                                      <span className="btn-pill none-badge">💊 no SE</span>
+                                    )}
+                                  </div>
+                                </td>
                                 <td className="repl-score-cell">
                                   <div className="bar-wrap">
                                     <div className="bar" style={{width:50}}>
@@ -778,9 +811,9 @@ export default function App() {
         <InteractionModal
           drug={modal.drug}
           type={modal.type}
-          foodData={foodMap[modal.drug.id]}
-          diseaseData={diseaseMap[modal.drug.id]}
-          seData={seMap[modal.drug.id]}
+          foodData={modal.candidateData ? { foods: modal.candidateData.foods } : foodMap[modal.drug.id]}
+          diseaseData={modal.candidateData ? { diseases: modal.candidateData.diseases } : diseaseMap[modal.drug.id]}
+          seData={modal.candidateData ? { side_effects: modal.candidateData.side_effects } : seMap[modal.drug.id]}
           onClose={closeModal}
         />
       )}

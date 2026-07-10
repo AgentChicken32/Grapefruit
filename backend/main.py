@@ -281,6 +281,9 @@ def find_similar_replacements(
             "name":              info_row["name"] if info_row else cand_id,
             "score":             row[1],
             "interaction_count": info_row["cnt"]  if info_row else 0,
+            "foods":             get_food_interactions(conn, cand_id),
+            "diseases":          get_disease_interactions(conn, cand_id),
+            "side_effects":      get_side_effects(conn, cand_id),
         })
 
     results.sort(key=lambda r: r["interaction_count"], reverse=True)
@@ -737,21 +740,6 @@ class PairScore(BaseModel):
     mechanism:   str | None
 
 
-class ReplacementCandidate(BaseModel):
-    id:                str
-    name:              str
-    score:             float
-    interaction_count: int
-    substitute_risk:   float | None
-
-
-class DrugReplacements(BaseModel):
-    drug_id:                    str
-    drug_name:                  str
-    original_interaction_count: int
-    replacements:               list[ReplacementCandidate]
-
-
 class FoodInteraction(BaseModel):
     food_name:   str
     severity:    int
@@ -789,6 +777,24 @@ class DrugSideEffects(BaseModel):
     drug_id:      str
     drug_name:    str
     side_effects: list[SideEffect]
+
+
+class ReplacementCandidate(BaseModel):
+    id:                str
+    name:              str
+    score:             float
+    interaction_count: int
+    foods:             list[FoodInteraction]
+    diseases:          list[DiseaseInteraction]
+    side_effects:      list[SideEffect]
+    substitute_risk:   float | None
+
+
+class DrugReplacements(BaseModel):
+    drug_id:                    str
+    drug_name:                  str
+    original_interaction_count: int
+    replacements:               list[ReplacementCandidate]
 
 
 class RegimeResponse(BaseModel):

@@ -33,6 +33,3 @@ methods.txt
 *.png
 *.css
 *.docx
-
-# no need to commit the interactions for now
-*.csv
