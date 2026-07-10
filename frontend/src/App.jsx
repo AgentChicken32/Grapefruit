@@ -146,7 +146,7 @@ const css = `
   .replacements-grid { display: flex; flex-direction: column; gap: 20px; }
 
   .replacement-group {
-    background: var(--surface); border: 1px solid var(--border);
+    background: var(--surface); border: 1px solid var(--accent);
     border-radius: var(--radius); overflow: hidden;
   }
   .replacement-group-header {
@@ -537,7 +537,8 @@ export default function App() {
 
   const clear = () => { setDrugs([]); setResult(null); setError(null); setQuery(""); setModal(null); };
 
-  const maxRisk = result ? Math.max(...result.drugs.map(d => d.risk), 0.001) : 1;
+  const maxRisk = 3; // drug risk scores are on a 0-3 scale
+  const similarityCutoff = result?.similarity_cutoff ?? 0.9;
 
   // Build lookup maps from result for modal
   const foodMap    = result ? Object.fromEntries(result.food_interactions?.map(g => [g.drug_id, g]) ?? []) : {};
@@ -706,7 +707,7 @@ export default function App() {
             {/* Similar replacement suggestions */}
             {result.similar_replacements?.some(group => group.replacements.length > 0) && (
               <>
-                <p className="section-title">Similar Drug Replacements <span style={{color:"var(--blue)",marginLeft:6,fontSize:"0.65rem",fontFamily:"var(--mono)"}}>matching score &gt; 90%</span></p>
+                <p className="section-title">Similar Drug Replacements <span style={{color:"var(--blue)",marginLeft:6,fontSize:"0.65rem",fontFamily:"var(--mono)"}}>matching score &gt; {(similarityCutoff * 100).toFixed(0)}%</span></p>
                 <div className="replacements-grid">
                   {result.similar_replacements.filter(group => group.replacements.length > 0).map(group => (
                     <div key={group.drug_id} className="replacement-group">
@@ -738,7 +739,7 @@ export default function App() {
                                 <td className="repl-score-cell">
                                   <div className="bar-wrap">
                                     <div className="bar" style={{width:50}}>
-                                      <div className="bar-fill" style={{ width: `${r.score * 100}%`, background: scoreColor(r.score) }} />
+                                      <div className="bar-fill" style={{ width: `${Math.max(0, Math.min(100, ((r.score - similarityCutoff) / (1 - similarityCutoff)) * 100))}%`, background: scoreColor(r.score) }} />
                                     </div>
                                     <span className="bar-label" style={{ color: scoreColor(r.score) }}>{(r.score * 100).toFixed(1)}%</span>
                                   </div>

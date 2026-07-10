@@ -796,6 +796,7 @@ class RegimeResponse(BaseModel):
     total_risk:           float
     normalized_risk:      float
     risk_method_weight:   float
+    similarity_cutoff:    float
     populated_edges:      int
     possible_edges:       int
     coverage_pct:         float
@@ -984,6 +985,7 @@ def regime_risk(req: RegimeRequest):
             total_risk=total_risk,
             normalized_risk=round(normalized_risk, 6),
             risk_method_weight=RISK_METHOD_WEIGHT,
+            similarity_cutoff=SIMILARITY_CUTOFF,
             populated_edges=populated,
             possible_edges=possible,
             coverage_pct=round(coverage, 1),
