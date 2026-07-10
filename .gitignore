@@ -22,8 +22,10 @@ dist/
 # VSCode
 .vscode/
 
-# Things we purposely want to exclude (usually test stuff)
+# Things we purposely want to exclude (usually test and dev stuff)
 exclude/
+.claude/
+methods.txt
 
 # Other unnecessary stuff
 *.json

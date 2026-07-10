@@ -399,9 +399,8 @@ function InteractionModal({ drug, type, foodData, diseaseData, seData, onClose }
                   };
                   const displayFreq = (se) =>
                     LABEL_BAR[se.freq_label] ?? (se.freq_lower ?? se.freq_upper ?? 0);
-                  const maxFreq = Math.max(...seItems.map(displayFreq), 0.001);
                   return seItems.map((se, i) => {
-                    const pct = (displayFreq(se) / maxFreq) * 100;
+                    const pct = displayFreq(se) * 100;
                     return (
                       <div key={i} className="modal-se-item">
                         <span className="modal-se-name">{se.se_name}</span>
@@ -613,10 +612,10 @@ export default function App() {
               <div className="score-card primary">
                 <label>Regime Risk</label>
                 <div className="value" style={{ color: riskColor(result.normalized_risk, 3) }}>
-                  {result.normalized_risk.toFixed(3)}
+                  {result.normalized_risk.toFixed(2)}
                 </div>
                 <div className="sub">
-                  {result.drugs.length} drugs · SE weight {((result.se_weight ?? 0) * 100).toFixed(0)}%
+                  {result.drugs.length} drugs · Method 1 weight {((result.risk_method_weight ?? 0) * 100).toFixed(0)}%
                 </div>
               </div>
               <div className="score-card">
@@ -705,65 +704,58 @@ export default function App() {
             </table>
 
             {/* Similar replacement suggestions */}
-            {result.similar_replacements?.length > 0 && (
+            {result.similar_replacements?.some(group => group.replacements.length > 0) && (
               <>
                 <p className="section-title">Similar Drug Replacements <span style={{color:"var(--blue)",marginLeft:6,fontSize:"0.65rem",fontFamily:"var(--mono)"}}>matching score &gt; 90%</span></p>
                 <div className="replacements-grid">
-                  {result.similar_replacements.map(group => (
+                  {result.similar_replacements.filter(group => group.replacements.length > 0).map(group => (
                     <div key={group.drug_id} className="replacement-group">
                       <div className="replacement-group-header">
                         <span className="drug-label">{group.drug_name}</span>
                         <span className="drug-id-badge">{group.drug_id}</span>
-                        {group.replacements.length > 0
-                          ? <span className="count-badge">{group.replacements.length} similar drug{group.replacements.length !== 1 ? "s" : ""}</span>
-                          : <span className="count-badge" style={{color:"var(--muted)",borderColor:"var(--border)",background:"transparent"}}>none found</span>
-                        }
+                        <span className="count-badge">{group.replacements.length} similar drug{group.replacements.length !== 1 ? "s" : ""}</span>
                       </div>
-                      {group.replacements.length === 0 ? (
-                        <p className="no-replacements">No drugs outside the regime exceed the 90% similarity threshold.</p>
-                      ) : (
-                        <table className="repl-table">
-                          <thead>
-                            <tr>
-                              <th>Replacement Drug</th>
-                              <th>ID</th>
-                              <th className="right">Interactions (original: {group.original_interaction_count.toLocaleString()})</th>
-                              <th className="right">Match Score</th>
-                              <th className="right">Regime Risk if Substituted</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {group.replacements.map(r => {
-                              const delta = r.substitute_risk != null ? r.substitute_risk - result.normalized_risk : null;
-                              const deltaColor = delta == null ? "var(--muted)" : delta < -0.0001 ? "#facc15" : delta > 0.0001 ? "#f87171" : "var(--muted)";
-                              const deltaLabel = delta == null ? "—" : delta > 0.0001 ? `+${delta.toFixed(4)}` : delta < -0.0001 ? delta.toFixed(4) : "±0";
-                              return (
-                                <tr key={r.id}>
-                                  <td className="repl-name">{r.name}</td>
-                                  <td className="repl-id">{r.id}</td>
-                                  <td className="repl-count">{r.interaction_count.toLocaleString()}</td>
-                                  <td className="repl-score-cell">
-                                    <div className="bar-wrap">
-                                      <div className="bar" style={{width:50}}>
-                                        <div className="bar-fill" style={{ width: `${r.score * 100}%`, background: scoreColor(r.score) }} />
-                                      </div>
-                                      <span className="bar-label" style={{ color: scoreColor(r.score) }}>{(r.score * 100).toFixed(1)}%</span>
+                      <table className="repl-table">
+                        <thead>
+                          <tr>
+                            <th>Replacement Drug</th>
+                            <th>ID</th>
+                            <th className="right">Interactions (original: {group.original_interaction_count.toLocaleString()})</th>
+                            <th className="right">Match Score</th>
+                            <th className="right">Regime Risk if Substituted</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {group.replacements.map(r => {
+                            const delta = r.substitute_risk != null ? r.substitute_risk - result.normalized_risk : null;
+                            const deltaColor = delta == null ? "var(--muted)" : delta < -0.0001 ? "#facc15" : delta > 0.0001 ? "#f87171" : "var(--muted)";
+                            const deltaLabel = delta == null ? "—" : delta > 0.0001 ? `+${delta.toFixed(2)}` : delta < -0.0001 ? delta.toFixed(2) : "±0";
+                            return (
+                              <tr key={r.id}>
+                                <td className="repl-name">{r.name}</td>
+                                <td className="repl-id">{r.id}</td>
+                                <td className="repl-count">{r.interaction_count.toLocaleString()}</td>
+                                <td className="repl-score-cell">
+                                  <div className="bar-wrap">
+                                    <div className="bar" style={{width:50}}>
+                                      <div className="bar-fill" style={{ width: `${r.score * 100}%`, background: scoreColor(r.score) }} />
                                     </div>
-                                  </td>
-                                  <td className="repl-score-cell">
-                                    {r.substitute_risk != null ? (
-                                      <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:2}}>
-                                        <span style={{fontFamily:"var(--mono)",fontSize:"0.8rem",color:riskColor(r.substitute_risk, maxRisk)}}>{r.substitute_risk.toFixed(4)}</span>
-                                        <span style={{fontFamily:"var(--mono)",fontSize:"0.7rem",color:deltaColor}}>{deltaLabel} vs current</span>
-                                      </div>
-                                    ) : <span style={{color:"var(--muted)",fontSize:"0.75rem"}}>no data</span>}
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      )}
+                                    <span className="bar-label" style={{ color: scoreColor(r.score) }}>{(r.score * 100).toFixed(1)}%</span>
+                                  </div>
+                                </td>
+                                <td className="repl-score-cell">
+                                  {r.substitute_risk != null ? (
+                                    <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:2}}>
+                                      <span style={{fontFamily:"var(--mono)",fontSize:"0.8rem",color:riskColor(r.substitute_risk, maxRisk)}}>{r.substitute_risk.toFixed(2)}</span>
+                                      <span style={{fontFamily:"var(--mono)",fontSize:"0.7rem",color:deltaColor}}>{deltaLabel} vs current</span>
+                                    </div>
+                                  ) : <span style={{color:"var(--muted)",fontSize:"0.75rem"}}>no data</span>}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
                     </div>
                   ))}
                 </div>
