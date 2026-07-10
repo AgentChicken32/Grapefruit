@@ -24,14 +24,65 @@ const css = `
     --sans:     'Syne', sans-serif;
   }
 
-  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; }
+  body.light {
+    --bg:       #f4f6f9;
+    --surface:  #ffffff;
+    --border:   #d1d5db;
+    --accent:   #16a34a;
+    --blue:     #2563eb;
+    --warn:     #ea580c;
+    --danger:   #dc2626;
+    --purple:   #9333ea;
+    --muted:    #6b7280;
+    --text:     #111827;
+    --subtext:  #4b5563;
+  }
+  body.light .header h1 { color: #111827; }
+  body.light .dropdown { background: #ffffff; }
+  body.light .data-table tr:hover td { background: #f9fafb; }
+  body.light .repl-table tr:hover td { background: #f9fafb; }
+  body.light .replacement-group-header { background: #f3f4f6; }
+  body.light .repl-table th { background: #f3f4f6; }
+  body.light .score-card.primary { background: #f0fdf4; }
+
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; transition: background 0.2s, color 0.2s; }
 
   .app { max-width: 860px; margin: 0 auto; padding: 48px 24px 80px; }
 
-  .header { margin-bottom: 48px; }
+  .header { margin-bottom: 48px; position: relative; }
   .header h1 { font-size: 2rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; color: #fff; }
   .header h1 span { color: var(--accent); }
   .header p { margin-top: 8px; color: var(--subtext); font-size: 0.875rem; font-family: var(--mono); }
+
+  .theme-toggle {
+    position: absolute; top: 0; right: 0;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 99px;
+    padding: 6px 14px; cursor: pointer; font-family: var(--mono); font-size: 0.72rem;
+    color: var(--muted); display: inline-flex; align-items: center; gap: 7px;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .theme-toggle:hover { border-color: var(--muted); color: var(--text); }
+  .theme-toggle .toggle-track {
+    width: 28px; height: 16px; border-radius: 8px; background: var(--border);
+    position: relative; transition: background 0.2s; flex-shrink: 0;
+  }
+  .theme-toggle.light-on .toggle-track { background: var(--accent); }
+  .theme-toggle .toggle-thumb {
+    position: absolute; top: 2px; left: 2px;
+    width: 12px; height: 12px; border-radius: 50%; background: var(--muted);
+    transition: transform 0.2s, background 0.2s;
+  }
+  .theme-toggle.light-on .toggle-thumb { transform: translateX(12px); background: #fff; }
+
+  .se-weight-row {
+    display: flex; align-items: center; gap: 12px; margin-top: 14px;
+    font-family: var(--mono); font-size: 0.72rem; color: var(--muted);
+  }
+  .se-weight-row label { white-space: nowrap; }
+  .se-weight-row input[type=range] {
+    flex: 1; max-width: 180px; accent-color: var(--accent); cursor: pointer;
+  }
+  .se-weight-val { min-width: 32px; color: var(--text); font-weight: 500; }
   .header-status {
     display: inline-flex; align-items: center; gap: 6px;
     font-family: var(--mono); font-size: 0.7rem; color: var(--muted);
@@ -289,6 +340,16 @@ const css = `
   .modal-disease-text { font-size: 0.8rem; color: var(--subtext); line-height: 1.55; }
 
   /* Side effect items inside modal */
+  .modal-se-header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 7px 20px; border-bottom: 1px solid var(--border);
+    background: var(--surface); position: sticky; top: 0; z-index: 1;
+    font-family: var(--mono); font-size: 0.62rem; text-transform: uppercase;
+    letter-spacing: 0.09em; color: var(--muted);
+  }
+  .modal-se-header-name { flex: 1; }
+  .modal-se-header-bar { width: 80px; flex-shrink: 0; }
+  .modal-se-header-freq { min-width: 70px; text-align: right; }
   .modal-se-item {
     display: flex; align-items: center; gap: 12px;
     padding: 10px 20px; border-bottom: 1px solid var(--border);
@@ -391,7 +452,6 @@ function InteractionModal({ drug, type, foodData, diseaseData, seData, onClose }
             seItems.length === 0
               ? <p className="modal-empty">No side effect frequency data for this drug.</p>
               : (() => {
-                  // Canonical bar widths for qualitative labels (purely visual, not numeric)
                   const LABEL_BAR = {
                     'very common': 1.0, 'common': 0.6, 'frequent': 0.55,
                     'uncommon': 0.3, 'infrequent': 0.25,
@@ -399,18 +459,25 @@ function InteractionModal({ drug, type, foodData, diseaseData, seData, onClose }
                   };
                   const displayFreq = (se) =>
                     LABEL_BAR[se.freq_label] ?? (se.freq_lower ?? se.freq_upper ?? 0);
-                  return seItems.map((se, i) => {
-                    const pct = displayFreq(se) * 100;
-                    return (
-                      <div key={i} className="modal-se-item">
-                        <span className="modal-se-name">{se.se_name}</span>
-                        <div className="modal-se-bar">
-                          <div className="modal-se-bar-fill" style={{ width: `${pct}%` }} />
+                  return [
+                    <div key="__hdr" className="modal-se-header">
+                      <span className="modal-se-header-name">Side Effect</span>
+                      <span className="modal-se-header-bar">Occurrence</span>
+                      <span className="modal-se-header-freq">Frequency</span>
+                    </div>,
+                    ...seItems.map((se, i) => {
+                      const pct = displayFreq(se) * 100;
+                      return (
+                        <div key={i} className="modal-se-item">
+                          <span className="modal-se-name">{se.se_name}</span>
+                          <div className="modal-se-bar">
+                            <div className="modal-se-bar-fill" style={{ width: `${pct}%` }} />
+                          </div>
+                          <span className="modal-se-freq">{freqLabel(se)}</span>
                         </div>
-                        <span className="modal-se-freq">{freqLabel(se)}</span>
-                      </div>
-                    );
-                  });
+                      );
+                    }),
+                  ];
                 })()
           )}
           {isFood && (
@@ -466,9 +533,15 @@ export default function App() {
   // Modal state: { drug: {id, name}, type: 'food'|'disease' } or null
   const [modal, setModal] = useState(null);
 
-  const inputRef     = useRef(null);
-  const inputAreaRef = useRef(null);
-  const debouncedQ   = useDebounce(query, 200);
+  // Change false → true here to default to light mode
+  const [darkMode, setDarkMode]   = useState(true);
+  // Risk method weight: 0 = entropy only, 1 = compounding only (default 0.5)
+  const [seWeight, setSeWeight]   = useState(0.5);
+
+  const inputRef      = useRef(null);
+  const inputAreaRef  = useRef(null);
+  const suppressRef   = useRef(false);  // prevent stale fetches re-opening dropdown after add
+  const debouncedQ    = useDebounce(query, 200);
 
   useEffect(() => {
     let cancelled = false;
@@ -483,15 +556,27 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    document.body.classList.toggle("light", !darkMode);
+  }, [darkMode]);
+
+  useEffect(() => {
     if (debouncedQ.length < 2) { setSuggs([]); return; }
+    let cancelled = false;
     fetch(`${API_BASE}/search?q=${encodeURIComponent(debouncedQ)}&limit=8`)
       .then(r => r.json())
-      .then(data => { setSuggs(data.filter(s => !drugs.some(d => d.id === s.id))); setActiveIdx(-1); })
-      .catch(() => setSuggs([]));
-  }, [debouncedQ, drugs]);
+      .then(data => {
+        if (!cancelled && !suppressRef.current)
+          setSuggs(data.filter(s => !drugs.some(d => d.id === s.id)));
+        setActiveIdx(-1);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [debouncedQ]); // intentionally omit `drugs` — filter applied on render below
 
   const addDrug = useCallback((drug) => {
     if (drugs.some(d => d.id === drug.id)) return;
+    suppressRef.current = true;
+    setTimeout(() => { suppressRef.current = false; }, 400);
     setDrugs(prev => [...prev, drug]);
     setQuery(""); setSuggs([]); setResult(null);
     inputRef.current?.focus();
@@ -517,7 +602,7 @@ export default function App() {
       const res = await fetch(`${API_BASE}/regime/risk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ drug_ids: drugs.map(d => d.id) }),
+        body: JSON.stringify({ drug_ids: drugs.map(d => d.id), risk_method_weight: seWeight }),
       });
       if (!res.ok) throw new Error(`Server error ${res.status}`);
       setResult(await res.json());
@@ -553,8 +638,27 @@ export default function App() {
       <style>{css}</style>
       <div className="app">
         <div className="header">
+          <button
+            className={`theme-toggle${darkMode ? "" : " light-on"}`}
+            onClick={() => setDarkMode(v => !v)}
+            aria-label="Toggle light/dark mode"
+          >
+            {darkMode ? "☾" : "☀"}
+            <span className="toggle-track"><span className="toggle-thumb" /></span>
+            {darkMode ? "Dark" : "Light"}
+          </button>
           <h1>Drug Regime<br /><span>Risk Scorer</span></h1>
           <p>Add drugs to a regime and assess interaction risk</p>
+          <div className="se-weight-row">
+            <label>Method 1 weight</label>
+            <input
+              type="range" min={0} max={1} step={0.05}
+              value={seWeight}
+              onChange={e => setSeWeight(parseFloat(e.target.value))}
+            />
+            <span className="se-weight-val">{Math.round(seWeight * 100)}%</span>
+            <span style={{color:"var(--muted)",fontSize:"0.65rem"}}>(0 = entropy · 1 = compounding)</span>
+          </div>
           <div className="header-status">
             <span className={`dot${online ? " online" : ""}`} />
             {online === null ? "connecting…"

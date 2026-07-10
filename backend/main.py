@@ -401,19 +401,27 @@ def entropy_risk(
     return max(0.0, weighted_mean - beta * entropy)
 
 
-def blended_method_risk(ddi_strengths: list[float], se_burdens: list[float]) -> float:
+def blended_method_risk(
+    ddi_strengths: list[float],
+    se_burdens: list[float],
+    weight: float = RISK_METHOD_WEIGHT,
+) -> float:
     """Weighted average of Method 1 and Method 3, weight adjustable via RISK_METHOD_WEIGHT."""
     m1 = compounding_risk(ddi_strengths, se_burdens)
     m3 = entropy_risk(ddi_strengths, se_burdens)
-    return RISK_METHOD_WEIGHT * m1 + (1.0 - RISK_METHOD_WEIGHT) * m3
+    return weight * m1 + (1.0 - weight) * m3
 
 
-def calc_normalized_risk(conn: sqlite3.Connection, drug_ids: list[str]) -> float | None:
+def calc_normalized_risk(
+    conn: sqlite3.Connection,
+    drug_ids: list[str],
+    weight: float = RISK_METHOD_WEIGHT,
+) -> float | None:
     if not drug_ids:
         return None
     strengths = regime_pairwise_strengths(conn, drug_ids)
     burdens   = regime_se_burdens(conn, drug_ids)
-    risks = [blended_method_risk(strengths[did], burdens[did]) for did in drug_ids]
+    risks = [blended_method_risk(strengths[did], burdens[did], weight=weight) for did in drug_ids]
     return sum(risks) / len(risks)
 
 
@@ -476,18 +484,23 @@ def resolve_drug(conn: sqlite3.Connection, query: str) -> dict | None:
 
 def search_drugs(conn: sqlite3.Connection, query: str, limit: int = 10) -> list[dict]:
     pattern = f"%{query}%"
+    # If query is purely numeric, also match by DDInter number
+    num_filter = query.strip().lstrip("0") or "0"
+    is_numeric = query.strip().isdigit()
     rows = conn.execute(
         """
         SELECT DISTINCT 'DDInter' || drug_a_num AS id, drug_a_name AS name
         FROM interactions
         WHERE LOWER(drug_a_name) LIKE LOWER(?)
+           OR (? AND CAST(drug_a_num AS TEXT) = ?)
         UNION
         SELECT DISTINCT 'DDInter' || drug_b_num AS id, drug_b_name AS name
         FROM interactions
         WHERE LOWER(drug_b_name) LIKE LOWER(?)
+           OR (? AND CAST(drug_b_num AS TEXT) = ?)
         LIMIT ?
         """,
-        (pattern, pattern, limit),
+        (pattern, is_numeric, num_filter, pattern, is_numeric, num_filter, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -720,7 +733,8 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 class RegimeRequest(BaseModel):
-    drug_ids: list[str]
+    drug_ids:           list[str]
+    risk_method_weight: float | None = None  # override RISK_METHOD_WEIGHT (0–1)
 
 
 class DrugRisk(BaseModel):
@@ -881,13 +895,15 @@ def regime_risk(req: RegimeRequest):
         regime_strengths = regime_pairwise_strengths(conn, resolved_ids)
         regime_burdens   = regime_se_burdens(conn, resolved_ids)
 
+        eff_weight = req.risk_method_weight if req.risk_method_weight is not None else RISK_METHOD_WEIGHT
+
         drug_risks: list[DrugRisk] = []
         for drug in resolved:
             strengths = regime_strengths[drug["id"]]
             burdens   = regime_burdens[drug["id"]]
             avg    = sum(strengths) / len(strengths) if strengths else None
             burden = sum(burdens) / len(burdens) if burdens else None
-            risk_val = blended_method_risk(strengths, burdens)
+            risk_val = blended_method_risk(strengths, burdens, weight=eff_weight)
             drug_risks.append(DrugRisk(
                 id=drug["id"],
                 name=drug["name"],
@@ -946,7 +962,7 @@ def regime_risk(req: RegimeRequest):
             replacement_objects: list[ReplacementCandidate] = []
             for c in candidates:
                 sub_ids = substitute_regime + [c["id"]]
-                sub_risk = calc_normalized_risk(conn, sub_ids)
+                sub_risk = calc_normalized_risk(conn, sub_ids, weight=eff_weight)
                 replacement_objects.append(ReplacementCandidate(
                     **c,
                     substitute_risk=round(sub_risk, 6) if sub_risk is not None else None,
@@ -990,7 +1006,7 @@ def regime_risk(req: RegimeRequest):
             drugs=drug_risks,
             total_risk=total_risk,
             normalized_risk=round(normalized_risk, 6),
-            risk_method_weight=RISK_METHOD_WEIGHT,
+            risk_method_weight=eff_weight,
             similarity_cutoff=SIMILARITY_CUTOFF,
             populated_edges=populated,
             possible_edges=possible,
