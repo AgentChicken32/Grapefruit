@@ -719,19 +719,17 @@ export default function App() {
                 <div className="value" style={{ color: riskColor(result.normalized_risk, 3) }}>
                   {result.normalized_risk.toFixed(2)}
                 </div>
-                <div className="sub">
-                  {result.drugs.length} drugs · Method 1 weight {((result.risk_method_weight ?? 0) * 100).toFixed(0)}%
-                </div>
+                <div className="sub">based on {result.drugs.length} recognized drug{result.drugs.length !== 1 ? "s" : ""}</div>
               </div>
               <div className="score-card">
                 <label>DB Coverage</label>
                 <div className={`value${result.coverage_pct < 30 ? " warn" : ""}`} style={result.coverage_pct >= 30 ? { color: "var(--text)" } : {}}>{result.coverage_pct}%</div>
-                <div className="sub">{result.populated_edges} / {result.possible_edges} pairs</div>
+                <div className="sub">{result.populated_edges} / {result.possible_edges} possible pairs</div>
               </div>
               <div className="score-card">
-                <label>Drugs Scored</label>
-                <div className="value" style={{ color: "var(--text)" }}>{result.drugs.length}</div>
-                <div className="sub">{result.unknown_drugs.length} unrecognised</div>
+                <label>Method 1 Weight</label>
+                <div className="value" style={{ color: "var(--text)" }}>{((result.risk_method_weight ?? 0) * 100).toFixed(0)}%</div>
+                <div className="sub">compounding ↔ entropy</div>
               </div>
             </div>
 
@@ -740,8 +738,8 @@ export default function App() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>Drug</th>
-                  <th>ID</th>
+                  <th>Drug Name</th>
+                  <th>Drug ID</th>
                   <th>Interactions</th>
                   <th className="right">Blended Risk</th>
                 </tr>
@@ -795,10 +793,10 @@ export default function App() {
                             <div className="bar">
                               <div className="bar-fill" style={{ width: `${(d.risk / maxRisk) * 100}%`, background: riskColor(d.risk, maxRisk) }} />
                             </div>
-                            {d.avg_strength !== null ? d.risk.toFixed(3) : <span className="no-data">no data</span>}
+                            {d.avg_strength !== null ? d.risk.toFixed(2) : <span className="no-data">no data</span>}
                           </div>
                           {d.se_burden != null && (
-                            <span className="risk-sub">SE burden {(d.se_burden * 100).toFixed(0)}%</span>
+                            <span className="risk-sub">{(d.se_burden * 100).toFixed(0)}% avg SE burden</span>
                           )}
                         </div>
                       </td>
@@ -811,7 +809,7 @@ export default function App() {
             {/* Similar replacement suggestions */}
             {result.similar_replacements?.some(group => group.replacements.length > 0) && (
               <>
-                <p className="section-title">Similar Drug Replacements <span style={{color:"var(--blue)",marginLeft:6,fontSize:"0.65rem",fontFamily:"var(--mono)"}}>matching score &gt; {(similarityCutoff * 100).toFixed(0)}%</span></p>
+                <p className="section-title">Similar Drug Replacements <span style={{color:"var(--blue)",marginLeft:6,fontSize:"0.65rem",fontFamily:"var(--mono)"}}>(match score &gt; {(similarityCutoff * 100).toFixed(0)}%)</span></p>
                 <div className="replacements-grid">
                   {result.similar_replacements.filter(group => group.replacements.length > 0).map(group => (
                     <div key={group.drug_id} className="replacement-group">
