@@ -203,7 +203,9 @@ const css = `
   .replacement-group-header {
     display: flex; align-items: center; gap: 10px;
     padding: 12px 16px; background: #0f1218; border-bottom: 1px solid var(--border);
+    cursor: pointer; user-select: none;
   }
+  .replacement-group-header:hover { background: #141720; }
   .replacement-group-header .drug-label { font-weight: 700; font-size: 0.9rem; color: var(--text); }
   .replacement-group-header .drug-id-badge {
     font-family: var(--mono); font-size: 0.68rem; color: var(--muted);
@@ -214,6 +216,11 @@ const css = `
     color: var(--blue); background: #0d1a2e; border: 1px solid #1e3a5f;
     border-radius: 99px; padding: 2px 8px;
   }
+  .replacement-group-header .collapse-caret {
+    font-size: 0.6rem; color: var(--muted); transition: transform 0.2s; flex-shrink: 0;
+  }
+  .replacement-group-header .collapse-caret.collapsed { transform: rotate(-90deg); }
+  .replacement-group-body { overflow: hidden; }
   .no-replacements {
     padding: 14px 16px; font-family: var(--mono); font-size: 0.75rem;
     color: var(--muted); font-style: italic;
@@ -534,9 +541,11 @@ export default function App() {
   const [modal, setModal] = useState(null);
 
   // Change false → true here to default to light mode
-  const [darkMode, setDarkMode]   = useState(true);
+  const [darkMode, setDarkMode]     = useState(true);
   // Risk method weight: 0 = entropy only, 1 = compounding only (default 0.5)
-  const [seWeight, setSeWeight]   = useState(0.5);
+  const [seWeight, setSeWeight]     = useState(0.5);
+  // Set of drug IDs whose replacement lists are collapsed
+  const [collapsedGroups, setCollapsedGroups] = useState(new Set());
 
   const inputRef      = useRef(null);
   const inputAreaRef  = useRef(null);
@@ -811,14 +820,22 @@ export default function App() {
               <>
                 <p className="section-title">Similar Drug Replacements <span style={{color:"var(--blue)",marginLeft:6,fontSize:"0.65rem",fontFamily:"var(--mono)"}}>(match score &gt; {(similarityCutoff * 100).toFixed(0)}%)</span></p>
                 <div className="replacements-grid">
-                  {result.similar_replacements.filter(group => group.replacements.length > 0).map(group => (
+                  {result.similar_replacements.filter(group => group.replacements.length > 0).map(group => {
+                    const isCollapsed = collapsedGroups.has(group.drug_id);
+                    const toggleGroup = () => setCollapsedGroups(prev => {
+                      const next = new Set(prev);
+                      next.has(group.drug_id) ? next.delete(group.drug_id) : next.add(group.drug_id);
+                      return next;
+                    });
+                    return (
                     <div key={group.drug_id} className="replacement-group">
-                      <div className="replacement-group-header">
+                      <div className="replacement-group-header" onClick={toggleGroup}>
+                        <span className={`collapse-caret${isCollapsed ? " collapsed" : ""}`}>▼</span>
                         <span className="drug-label">{group.drug_name}</span>
                         <span className="drug-id-badge">{group.drug_id}</span>
                         <span className="count-badge">{group.replacements.length} similar drug{group.replacements.length !== 1 ? "s" : ""}</span>
                       </div>
-                      <table className="repl-table">
+                      {!isCollapsed && <table className="repl-table">
                         <thead>
                           <tr>
                             <th>Replacement Drug</th>
@@ -891,9 +908,10 @@ export default function App() {
                             );
                           })}
                         </tbody>
-                      </table>
+                      </table>}
                     </div>
-                  ))}
+                  );
+                  })}
                 </div>
               </>
             )}
