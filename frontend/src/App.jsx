@@ -168,6 +168,32 @@ const css = `
     color: var(--muted); margin: 28px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
   }
 
+  .legend-toggle {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 0.68rem; color: var(--muted);
+    background: none; border: 1px solid var(--border); border-radius: 99px;
+    padding: 3px 10px; cursor: pointer; transition: border-color 0.15s, color 0.15s;
+    margin-bottom: 10px;
+  }
+  .legend-toggle:hover { border-color: var(--muted); color: var(--text); }
+  .legend-toggle .legend-caret { font-size: 0.55rem; transition: transform 0.2s; transform: rotate(-90deg); }
+  .legend-toggle .legend-caret.open { transform: rotate(0deg); }
+
+  .legend-box {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    margin-bottom: 16px; overflow: hidden; animation: fadeUp 0.15s ease;
+  }
+  .legend-row {
+    display: flex; align-items: flex-start; gap: 14px;
+    padding: 9px 16px; border-bottom: 1px solid var(--border);
+  }
+  .legend-row:last-child { border-bottom: none; }
+  .legend-score {
+    font-family: var(--mono); font-size: 0.88rem; font-weight: 600;
+    min-width: 20px; flex-shrink: 0; line-height: 1.45;
+  }
+  .legend-label { font-size: 0.8rem; color: var(--subtext); line-height: 1.45; }
+
   .data-table { width: 100%; border-collapse: collapse; }
   .data-table th {
     font-family: var(--mono); font-size: 0.65rem; text-transform: uppercase;
@@ -546,6 +572,8 @@ export default function App() {
   const [seWeight, setSeWeight]     = useState(0.5);
   // Set of drug IDs whose replacement lists are collapsed
   const [collapsedGroups, setCollapsedGroups] = useState(new Set());
+  const [showRiskLegend, setShowRiskLegend]         = useState(false);
+  const [showSeverityLegend, setShowSeverityLegend] = useState(false);
 
   const inputRef      = useRef(null);
   const inputAreaRef  = useRef(null);
@@ -742,8 +770,50 @@ export default function App() {
               </div>
             </div>
 
+            {/* Regime risk legend */}
+            <button className="legend-toggle" onClick={() => setShowRiskLegend(v => !v)}>
+              <span className={`legend-caret${showRiskLegend ? " open" : ""}`}>▼</span>
+              Risk score guide (0 – 3)
+            </button>
+            {showRiskLegend && (
+              <div className="legend-box">
+                {[
+                  { range: "0 – 1", color: "#facc15", label: "Low — interactions are minor or well-managed; routine monitoring is sufficient." },
+                  { range: "1 – 2", color: "#fb923c", label: "Moderate — clinically significant interactions present; dose adjustment or closer monitoring may be needed." },
+                  { range: "2 – 3", color: "#f87171", label: "High — serious interactions likely; consider alternative drugs or intensive monitoring." },
+                ].map(({ range, color, label }) => (
+                  <div key={range} className="legend-row">
+                    <span className="legend-score" style={{ color }}>{range}</span>
+                    <span className="legend-label">{label}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Individual drug risk with food/disease buttons */}
             <p className="section-title">Individual Drug Risk</p>
+
+            {/* Severity legend */}
+            <button className="legend-toggle" onClick={() => setShowSeverityLegend(v => !v)}>
+              <span className={`legend-caret${showSeverityLegend ? " open" : ""}`}>▼</span>
+              Food &amp; disease severity guide (1 – 5)
+            </button>
+            {showSeverityLegend && (
+              <div className="legend-box">
+                {[
+                  { score: "1", color: "#facc15", label: "Minor — unlikely to require intervention." },
+                  { score: "2", color: "#f59e0b", label: "Moderate — may require dose adjustment or monitoring." },
+                  { score: "3", color: "#fb923c", label: "Severe — significant risk; some patients may require hospitalization." },
+                  { score: "4", color: "#ef4444", label: "High risk — likely hospitalization; possible fatal outcome." },
+                  { score: "5", color: "#f87171", label: "Critical — near-certain hospitalization and high risk of death." },
+                ].map(({ score, color, label }) => (
+                  <div key={score} className="legend-row">
+                    <span className="legend-score" style={{ color }}>{score}</span>
+                    <span className="legend-label">{label}</span>
+                  </div>
+                ))}
+              </div>
+            )}
             <table className="data-table">
               <thead>
                 <tr>
