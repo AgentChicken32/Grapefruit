@@ -5,6 +5,10 @@ Drug data:
     Source:  SIDER (sideeffects.embl.de)
     License: Creative Commons Attribution-ShareAlike 4.0
 
+DDI predictions:
+    Source:  DDI-LLM (github.com/sshaghayeghs/DDI-LLM)
+    License: None - this might be a problem!!!
+
 Code libraries:
     Source:  Node.js (nodejs.org)
     License: Creative Commons Attribution 4.0 (???)

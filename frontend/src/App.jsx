@@ -723,7 +723,7 @@ export default function App() {
           {suggestions.length > 0 && (
             <div className="dropdown">
               {suggestions.map((s, i) => (
-                <div key={s.id} className={`dropdown-item${i === activeIdx ? " active" : ""}`} onMouseDown={() => addDrug(s)}>
+                <div key={s.id} className={`dropdown-item${i === activeIdx ? " active" : ""}`} onMouseDown={e => { e.preventDefault(); addDrug(s); }}>
                   <span className="drug-name">{s.name}</span>
                   <span className="drug-id">{s.id}</span>
                 </div>
