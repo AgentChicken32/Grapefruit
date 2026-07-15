@@ -21,13 +21,16 @@ dist/
 
 # Things we purposely want to exclude (usually test stuff)
 exclude/
+methods.txt
 
 # Other unnecessary stuff
 *.json
+!vercel.json
 *.svg
 *.png
 *.css
 *.docx
 
-# no need to commit the interactions for now
+# no need to commit large files
 *.csv
+*.tsv

@@ -219,6 +219,59 @@ Set `API_BASE` at the top of `src/App.jsx` if your backend runs on a different p
 
 ---
 
+## Cloud Deployment (Vercel + Supabase)
+
+The project is being migrated to Vercel (frontend, hosted straight from GitHub)
++ Supabase (Postgres). This is in progress; today only the data migration and
+frontend scaffolding are in place. The FastAPI backend still runs against the
+local SQLite DB rebuilt from CSVs, as described above - `main.py` has not yet
+been rewritten to query Postgres.
+
+### 1. Create a Supabase project
+
+In the [Supabase dashboard](https://supabase.com/dashboard), create a new
+project and wait for it to finish provisioning. Then go to
+**Project Settings -> Database -> Connection string** and copy the
+**Transaction pooler** string (port `6543`) - it's the one safe to use from
+many short-lived connections (a one-off script today, serverless functions
+later), unlike the direct connection on port `5432`.
+
+### 2. Import the data into Supabase
+
+```bash
+cp backend/.env.example backend/.env
+# edit backend/.env and paste in your DATABASE_URL
+
+pip install -r requirements.txt
+cd backend
+python migrate_to_supabase.py
+```
+
+This applies [`backend/schema.sql`](backend/schema.sql) and loads, from
+scratch each run (`TRUNCATE` then reload - safe to re-run after the source
+files change):
+
+- `interactions.csv` -> `interactions`
+- (computed) Sorensen-Dice similarity -> `matching_scores`
+- `drug_food.csv` -> `food_interactions`
+- `drug_disease.csv` -> `disease_interactions`
+- `cid_to_ddinter.csv` + `Drug_SE_DB/meddra_freq.tsv/meddra_freq.tsv` -> `side_effects`
+
+None of these source files are committed to git (see `.gitignore`), so this
+script only needs to be run from a machine that has them locally - it is not
+part of the Vercel build.
+
+### 3. Deploy the frontend to Vercel
+
+[`vercel.json`](vercel.json) builds `frontend/` with Vite and serves
+`frontend/dist`. Import the GitHub repo in Vercel as-is (repo root, not
+`frontend/`) and it will pick this up automatically. Set the `VITE_API_BASE`
+env var in the Vercel project to point at wherever the backend is reachable
+(see `frontend/.env.example`) - until the backend is converted to run on
+Vercel too, this still means a separately-hosted FastAPI instance.
+
+---
+
 ## Performance Notes
 
 - SQLite with indexes on both drug ID columns handles 200 k+ rows in milliseconds for typical queries.
