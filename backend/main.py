@@ -6,6 +6,7 @@ Computes and persists pairwise drug matching scores on first run.
 
 import csv
 import itertools
+import math
 import os
 import sqlite3
 import sys
@@ -25,9 +26,15 @@ FOOD_CSV_PATH     = os.environ.get("FOOD_CSV",     "drug_food.csv")
 DISEASE_CSV_PATH  = os.environ.get("DISEASE_CSV",  "drug_disease.csv")
 DB_PATH           = os.environ.get("DRUG_DB",      "interactions.db")
 SIMILARITY_CUTOFF = float(os.environ.get("SIM_CUTOFF", "0.90"))
-# Weight given to side-effect burden vs drug-drug interaction strength (0–1).
-# 0.0 = interactions only, 1.0 = side effects only.
-SE_WEIGHT = float(os.environ.get("SE_WEIGHT", "0.25"))
+
+MAX_DDI_STRENGTH = 3.0  # DDI interaction-strength scale used throughout
+
+# Weight given to Method 1 (multiplicative compounding) vs Method 3
+# (burden-weighted entropy) when blending the two into a drug's risk score.
+# 1.0 = compounding only, 0.0 = entropy only.
+RISK_METHOD_WEIGHT = float(os.environ.get("RISK_METHOD_WEIGHT", "0.5"))
+COMPOUND_ALPHA = float(os.environ.get("COMPOUND_ALPHA", "0.5"))  # Method 1 SE-compounding exponent
+ENTROPY_BETA   = float(os.environ.get("ENTROPY_BETA",   "0.3"))  # Method 3 entropy penalty
 
 # ---------------------------------------------------------------------------
 # DB helpers
@@ -274,6 +281,9 @@ def find_similar_replacements(
             "name":              info_row["name"] if info_row else cand_id,
             "score":             row[1],
             "interaction_count": info_row["cnt"]  if info_row else 0,
+            "foods":             get_food_interactions(conn, cand_id),
+            "diseases":          get_disease_interactions(conn, cand_id),
+            "side_effects":      get_side_effects(conn, cand_id),
         })
 
     results.sort(key=lambda r: r["interaction_count"], reverse=True)
@@ -284,59 +294,134 @@ def find_similar_replacements(
 # Risk calculation helpers
 # ---------------------------------------------------------------------------
 
-def drug_avg_strength(conn: sqlite3.Connection, drug_id: str, regime_ids: list[str] | None = None) -> float | None:
-    if regime_ids is not None:
-        other_ids = [rid for rid in regime_ids if rid != drug_id]
-        if not other_ids:
-            return None
-        drug_num   = _id_to_num(drug_id)
-        other_nums = [_id_to_num(rid) for rid in other_ids]
-        placeholders = ",".join("?" * len(other_nums))
-        row = conn.execute(
-            f"""
-            SELECT AVG(strength) AS avg_s
-            FROM interactions
-            WHERE (drug_a_num = ? AND drug_b_num IN ({placeholders}))
-               OR (drug_b_num = ? AND drug_a_num IN ({placeholders}))
-            """,
-            [drug_num] + other_nums + [drug_num] + other_nums,
-        ).fetchone()
-    else:
-        drug_num = _id_to_num(drug_id)
-        row = conn.execute(
-            """
-            SELECT AVG(strength) AS avg_s
-            FROM interactions
-            WHERE drug_a_num = ? OR drug_b_num = ?
-            """,
-            (drug_num, drug_num),
-        ).fetchone()
-    return row["avg_s"]
+def regime_pairwise_strengths(conn: sqlite3.Connection, drug_ids: list[str]) -> dict[str, list[float]]:
+    """
+    One query for the whole regime: for every drug, the DDI strengths
+    (0-3 scale) of its interactions with the other drugs in the regime.
+    """
+    result: dict[str, list[float]] = {did: [] for did in drug_ids}
+    if len(drug_ids) < 2:
+        return result
+    num_to_id = {_id_to_num(did): did for did in drug_ids}
+    nums = list(num_to_id.keys())
+    placeholders = ",".join("?" * len(nums))
+    rows = conn.execute(
+        f"""
+        SELECT drug_a_num, drug_b_num, strength
+        FROM interactions
+        WHERE drug_a_num IN ({placeholders}) AND drug_b_num IN ({placeholders})
+        """,
+        nums + nums,
+    ).fetchall()
+    for row in rows:
+        a_id = num_to_id.get(row["drug_a_num"])
+        b_id = num_to_id.get(row["drug_b_num"])
+        if a_id is None or b_id is None or a_id == b_id:
+            continue
+        result[a_id].append(row["strength"])
+        result[b_id].append(row["strength"])
+    return result
 
 
-def blended_drug_risk(
-    interaction_strength: float | None,
-    se_burden: float | None,
-    se_weight: float = SE_WEIGHT,
+def regime_se_burdens(conn: sqlite3.Connection, drug_ids: list[str]) -> dict[str, list[float]]:
+    """One query for the whole regime: each drug's known side-effect frequencies (0-1 scale)."""
+    result: dict[str, list[float]] = {did: [] for did in drug_ids}
+    num_to_id = {_id_to_num(did): did for did in drug_ids}
+    nums = list(num_to_id.keys())
+    placeholders = ",".join("?" * len(nums))
+    rows = conn.execute(
+        f"""
+        SELECT ddinter_num, freq_upper
+        FROM side_effects
+        WHERE ddinter_num IN ({placeholders}) AND freq_upper IS NOT NULL
+        """,
+        nums,
+    ).fetchall()
+    for row in rows:
+        did = num_to_id.get(row["ddinter_num"])
+        if did is not None:
+            result[did].append(row["freq_upper"])
+    return result
+
+
+def compounding_risk(
+    ddi_strengths: list[float],
+    se_burdens: list[float],
+    alpha: float = COMPOUND_ALPHA,
 ) -> float:
     """
-    Blend interaction strength (0–3 scale) with side-effect burden (0–1 scale,
-    normalised to 0–3) using se_weight.  Missing values default to 0.
+    Method 1 - Multiplicative Risk Compounding.
+    Risk = MAX_DDI_STRENGTH * [1 - prod(1 - DDIi/MAX)] * [1 - prod(1 - SEj)]^alpha
+    A channel with no data is dropped rather than treated as a verified
+    zero, so a drug with SE data but no DDI partners (or vice versa) isn't
+    forced to a total risk of 0.
     """
-    interaction = interaction_strength if interaction_strength is not None else 0.0
-    # Normalise SE burden from [0,1] to [0,3] to match interaction scale
-    se = (se_burden * 3.0) if se_burden is not None else 0.0
-    return (1.0 - se_weight) * interaction + se_weight * se
+    ddi_bracket = None
+    if ddi_strengths:
+        survival = 1.0
+        for s in ddi_strengths:
+            survival *= (1.0 - s / MAX_DDI_STRENGTH)
+        ddi_bracket = 1.0 - survival
+
+    se_bracket = None
+    if se_burdens:
+        survival = 1.0
+        for b in se_burdens:
+            survival *= (1.0 - b)
+        se_bracket = 1.0 - survival
+
+    if ddi_bracket is None and se_bracket is None:
+        return 0.0
+    if ddi_bracket is None:
+        return MAX_DDI_STRENGTH * (se_bracket ** alpha)
+    if se_bracket is None:
+        return MAX_DDI_STRENGTH * ddi_bracket
+    return MAX_DDI_STRENGTH * ddi_bracket * (se_bracket ** alpha)
 
 
-def calc_normalized_risk(conn: sqlite3.Connection, drug_ids: list[str]) -> float | None:
+def entropy_risk(
+    ddi_strengths: list[float],
+    se_burdens: list[float],
+    beta: float = ENTROPY_BETA,
+) -> float:
+    """
+    Method 3 - Burden-Weighted Entropy Score.
+    Each DDI strength and each SE burden (rescaled 0-1 -> 0-3) is treated as
+    one event with magnitude b_k, weighted by its own share of total
+    magnitude p_k = b_k / sum(b). Risk = sum(p_k * b_k) - beta * H(p), which
+    reduces to sum(b_k^2) / sum(b_k) - beta * H(p).
+    """
+    magnitudes = [s for s in ddi_strengths if s > 0]
+    magnitudes += [MAX_DDI_STRENGTH * b for b in se_burdens if b > 0]
+    if not magnitudes:
+        return 0.0
+    total = sum(magnitudes)
+    weighted_mean = sum(m * m for m in magnitudes) / total
+    entropy = -sum((m / total) * math.log(m / total) for m in magnitudes)
+    return max(0.0, weighted_mean - beta * entropy)
+
+
+def blended_method_risk(
+    ddi_strengths: list[float],
+    se_burdens: list[float],
+    weight: float = RISK_METHOD_WEIGHT,
+) -> float:
+    """Weighted average of Method 1 and Method 3, weight adjustable via RISK_METHOD_WEIGHT."""
+    m1 = compounding_risk(ddi_strengths, se_burdens)
+    m3 = entropy_risk(ddi_strengths, se_burdens)
+    return weight * m1 + (1.0 - weight) * m3
+
+
+def calc_normalized_risk(
+    conn: sqlite3.Connection,
+    drug_ids: list[str],
+    weight: float = RISK_METHOD_WEIGHT,
+) -> float | None:
     if not drug_ids:
         return None
-    risks = []
-    for did in drug_ids:
-        strength = drug_avg_strength(conn, did, regime_ids=drug_ids)
-        burden   = drug_se_burden(conn, did)
-        risks.append(blended_drug_risk(strength, burden))
+    strengths = regime_pairwise_strengths(conn, drug_ids)
+    burdens   = regime_se_burdens(conn, drug_ids)
+    risks = [blended_method_risk(strengths[did], burdens[did], weight=weight) for did in drug_ids]
     return sum(risks) / len(risks)
 
 
@@ -399,18 +484,23 @@ def resolve_drug(conn: sqlite3.Connection, query: str) -> dict | None:
 
 def search_drugs(conn: sqlite3.Connection, query: str, limit: int = 10) -> list[dict]:
     pattern = f"%{query}%"
+    # If query is purely numeric, also match by DDInter number
+    num_filter = query.strip().lstrip("0") or "0"
+    is_numeric = query.strip().isdigit()
     rows = conn.execute(
         """
         SELECT DISTINCT 'DDInter' || drug_a_num AS id, drug_a_name AS name
         FROM interactions
         WHERE LOWER(drug_a_name) LIKE LOWER(?)
+           OR (? AND CAST(drug_a_num AS TEXT) = ?)
         UNION
         SELECT DISTINCT 'DDInter' || drug_b_num AS id, drug_b_name AS name
         FROM interactions
         WHERE LOWER(drug_b_name) LIKE LOWER(?)
+           OR (? AND CAST(drug_b_num AS TEXT) = ?)
         LIMIT ?
         """,
-        (pattern, pattern, limit),
+        (pattern, is_numeric, num_filter, pattern, is_numeric, num_filter, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -581,23 +671,6 @@ def get_disease_interactions(conn: sqlite3.Connection, drug_id: str) -> list[dic
     return [dict(r) for r in rows]
 
 
-def drug_se_burden(conn: sqlite3.Connection, drug_id: str) -> float | None:
-    """
-    Returns the average freq_upper across all side effects for this drug (0–1 scale).
-    Entries without a known frequency are excluded.  Returns None if no data exists.
-    """
-    drug_num = _id_to_num(drug_id)
-    row = conn.execute(
-        """
-        SELECT AVG(freq_upper) AS burden
-        FROM side_effects
-        WHERE ddinter_num = ? AND freq_upper IS NOT NULL
-        """,
-        (drug_num,),
-    ).fetchone()
-    return row["burden"] if row and row["burden"] is not None else None
-
-
 def get_side_effects(
     conn: sqlite3.Connection,
     drug_id: str,
@@ -660,7 +733,8 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 
 class RegimeRequest(BaseModel):
-    drug_ids: list[str]
+    drug_ids:           list[str]
+    risk_method_weight: float | None = None  # override RISK_METHOD_WEIGHT (0–1)
 
 
 class DrugRisk(BaseModel):
@@ -678,21 +752,6 @@ class PairScore(BaseModel):
     drug_b_name: str
     score:       float | None
     mechanism:   str | None
-
-
-class ReplacementCandidate(BaseModel):
-    id:                str
-    name:              str
-    score:             float
-    interaction_count: int
-    substitute_risk:   float | None
-
-
-class DrugReplacements(BaseModel):
-    drug_id:                    str
-    drug_name:                  str
-    original_interaction_count: int
-    replacements:               list[ReplacementCandidate]
 
 
 class FoodInteraction(BaseModel):
@@ -734,11 +793,30 @@ class DrugSideEffects(BaseModel):
     side_effects: list[SideEffect]
 
 
+class ReplacementCandidate(BaseModel):
+    id:                str
+    name:              str
+    score:             float
+    interaction_count: int
+    foods:             list[FoodInteraction]
+    diseases:          list[DiseaseInteraction]
+    side_effects:      list[SideEffect]
+    substitute_risk:   float | None
+
+
+class DrugReplacements(BaseModel):
+    drug_id:                    str
+    drug_name:                  str
+    original_interaction_count: int
+    replacements:               list[ReplacementCandidate]
+
+
 class RegimeResponse(BaseModel):
     drugs:                list[DrugRisk]
     total_risk:           float
     normalized_risk:      float
-    se_weight:            float
+    risk_method_weight:   float
+    similarity_cutoff:    float
     populated_edges:      int
     possible_edges:       int
     coverage_pct:         float
@@ -811,11 +889,21 @@ def regime_risk(req: RegimeRequest):
                 unknown.append(q)
 
         resolved_ids = [d["id"] for d in resolved]
+
+        # Batched: one query for all pairwise DDI strengths and one for all
+        # SE burdens across the whole regime, instead of a query per drug.
+        regime_strengths = regime_pairwise_strengths(conn, resolved_ids)
+        regime_burdens   = regime_se_burdens(conn, resolved_ids)
+
+        eff_weight = req.risk_method_weight if req.risk_method_weight is not None else RISK_METHOD_WEIGHT
+
         drug_risks: list[DrugRisk] = []
         for drug in resolved:
-            avg     = drug_avg_strength(conn, drug["id"], regime_ids=resolved_ids)
-            burden  = drug_se_burden(conn, drug["id"])
-            risk_val = blended_drug_risk(avg, burden)
+            strengths = regime_strengths[drug["id"]]
+            burdens   = regime_burdens[drug["id"]]
+            avg    = sum(strengths) / len(strengths) if strengths else None
+            burden = sum(burdens) / len(burdens) if burdens else None
+            risk_val = blended_method_risk(strengths, burdens, weight=eff_weight)
             drug_risks.append(DrugRisk(
                 id=drug["id"],
                 name=drug["name"],
@@ -874,7 +962,7 @@ def regime_risk(req: RegimeRequest):
             replacement_objects: list[ReplacementCandidate] = []
             for c in candidates:
                 sub_ids = substitute_regime + [c["id"]]
-                sub_risk = calc_normalized_risk(conn, sub_ids)
+                sub_risk = calc_normalized_risk(conn, sub_ids, weight=eff_weight)
                 replacement_objects.append(ReplacementCandidate(
                     **c,
                     substitute_risk=round(sub_risk, 6) if sub_risk is not None else None,
@@ -918,7 +1006,8 @@ def regime_risk(req: RegimeRequest):
             drugs=drug_risks,
             total_risk=total_risk,
             normalized_risk=round(normalized_risk, 6),
-            se_weight=SE_WEIGHT,
+            risk_method_weight=eff_weight,
+            similarity_cutoff=SIMILARITY_CUTOFF,
             populated_edges=populated,
             possible_edges=possible,
             coverage_pct=round(coverage, 1),
