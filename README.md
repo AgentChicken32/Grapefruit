@@ -5,13 +5,15 @@
 ```
 FISH-Drugs/
 ├── backend/
-│   ├── main.py              # FastAPI app
-│   ├── interactions.csv     # Drug interaction data (put your CSV here)
-│   ├── interactions.db      # SQLite DB rebuilt from CSV on every start
+│   ├── main.py                  # FastAPI app (reads from Supabase Postgres)
+│   ├── schema.sql               # Postgres schema
+│   ├── migrate_to_supabase.py   # One-time/re-runnable data import (see Cloud Deployment)
+│   ├── build_drug_mapping.py    # Regenerates cid_to_ddinter.csv from Supabase + Drug_SE_DB
+│   ├── interactions.csv         # Drug interaction data (local only, not committed)
 │   └── requirements.txt
 └── frontend/
     └── src/
-        └── App.jsx          # Single-file React frontend (Vite project)
+        └── App.jsx              # Single-file React frontend (Vite project)
 ```
 
 ---
@@ -44,7 +46,7 @@ DDInter001,Warfarin,DDInter003,Ibuprofen,0.72,Unknown,Blood
 - Rows with non-numeric strength or fewer than 5 columns are silently skipped.
 - Mechanism values that are `Unknown`, blank, or purely numeric (malformed rows) are stored as `NULL`.
 - Column 7 (category) is parsed but not stored or used.
-- The DB is **fully rebuilt from the CSV on every server start**, so any change to the CSV takes effect on the next restart.
+- Loaded into Supabase by `migrate_to_supabase.py` (see Cloud Deployment below), not rebuilt by the app itself. Re-run that script after changing the CSV.
 
 ### Drug-food interactions
 
@@ -59,8 +61,8 @@ Severity level, Food name, Description, Management, Mechanism, References, drug_
 - `drug_id` should match the drug ID values used in the interactions CSV
   (e.g. `DDInter1075`).
 - `References` is read but not currently surfaced by the API.
-- The table is rebuilt from this CSV on every server start. If the file is
-  missing, food-interaction lookups simply return empty results.
+- Loaded into Supabase by `migrate_to_supabase.py`. If the file is missing at
+  migration time, food-interaction lookups simply return empty results.
 
 ### Drug-disease interactions
 
@@ -75,39 +77,41 @@ Severity level, Disease name, Text, drug_id
 - `drug_id` should match the drug ID values used in the interactions CSV
   (e.g. `DDInter1075`).
 - `Text` describes the risk/contraindication for that disease.
-- The table is rebuilt from this CSV on every server start. If the file is
-  missing, disease-interaction lookups simply return empty results.
+- Loaded into Supabase by `migrate_to_supabase.py`. If the file is missing at
+  migration time, disease-interaction lookups simply return empty results.
 
 ---
 
 ## Backend Setup
 
+Requires a Supabase project already populated via `migrate_to_supabase.py`
+(see Cloud Deployment below) - the app only reads from Postgres, it doesn't
+build any local database.
+
 ```bash
 cd backend
 pip install -r requirements.txt
 
-# Optional: point to a different CSV or DB location
-export DRUG_CSV=/path/to/interactions.csv   # default: interactions.csv
-export DRUG_DB=/path/to/interactions.db     # default: interactions.db
-export SIM_CUTOFF=0.90                      # similarity threshold (default 0.90)
+cp .env.example .env
+# edit .env and set DATABASE_URL to your Supabase connection string
+
+# Optional: export SIM_CUTOFF=0.90  # similarity threshold (default 0.90)
 
 uvicorn main:app --reload --port 8000
 ```
 
-On startup the server will:
-1. Drop and rebuild `interactions.db` from the CSV.
-2. Compute and persist pairwise Sørensen-Dice matching scores (skipped if already present).
-3. Print the interaction count and be ready at `http://localhost:8000`.
+Server is ready at `http://localhost:8000`, with all routes under `/api`.
 
 ### API Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Returns DB interaction count |
-| GET | `/search?q=warfarin&limit=8` | Autocomplete drug search (min 2 chars) |
-| POST | `/regime/risk` | Full regime risk analysis |
+| GET | `/api/health` | Returns DB interaction count |
+| GET | `/api/search?q=warfarin&limit=8` | Autocomplete drug search (min 2 chars) |
+| GET | `/api/drugs/{drug_id}/side_effects` | Side effects for a single drug |
+| POST | `/api/regime/risk` | Full regime risk analysis |
 
-#### POST `/regime/risk`
+#### POST `/api/regime/risk`
 
 **Request:**
 ```json
@@ -173,7 +177,7 @@ Pairwise drug similarity uses the **Sørensen-Dice coefficient** over shared int
 Score(A, B) = 2 × |neighbours(A) ∩ neighbours(B)| / (|neighbours(A)| + |neighbours(B)|)
 ```
 
-Scores are precomputed for all drug pairs at startup and cached in `matching_scores` (persists across restarts). The "Similar Drug Replacements" section lists drugs outside the regime with a matching score ≥ the `SIM_CUTOFF` threshold (default 90%), sorted by total interaction count.
+Scores are precomputed for all drug pairs once by `migrate_to_supabase.py` and stored in `matching_scores` - not recomputed by the app itself. The "Similar Drug Replacements" section lists drugs outside the regime with a matching score ≥ the `SIM_CUTOFF` threshold (default 90%), sorted by total interaction count.
 
 ### Food interactions
 
@@ -205,7 +209,7 @@ npm run dev        # dev server at http://localhost:5173
 npm run build      # production build → frontend/dist/
 ```
 
-Set `API_BASE` at the top of `src/App.jsx` if your backend runs on a different port.
+`API_BASE` (top of `src/App.jsx`) reads the `VITE_API_BASE` env var, falling back to `http://localhost:8000/api` for local dev. See `frontend/.env.example`.
 
 ### UI Sections
 
@@ -221,11 +225,9 @@ Set `API_BASE` at the top of `src/App.jsx` if your backend runs on a different p
 
 ## Cloud Deployment (Vercel + Supabase)
 
-The project is being migrated to Vercel (frontend, hosted straight from GitHub)
-+ Supabase (Postgres). This is in progress; today only the data migration and
-frontend scaffolding are in place. The FastAPI backend still runs against the
-local SQLite DB rebuilt from CSVs, as described above - `main.py` has not yet
-been rewritten to query Postgres.
+The app is hosted on Vercel straight from GitHub, with Supabase (Postgres) as
+the only datastore - `main.py` has no local-database fallback, `DATABASE_URL`
+is required unconditionally, whether running locally or deployed.
 
 ### 1. Create a Supabase project
 
@@ -239,11 +241,12 @@ later), unlike the direct connection on port `5432`.
 ### 2. Import the data into Supabase
 
 ```bash
-cp backend/.env.example backend/.env
-# edit backend/.env and paste in your DATABASE_URL
-
-pip install -r requirements.txt
 cd backend
+pip install -r requirements.txt
+
+cp .env.example .env
+# edit .env and paste in your DATABASE_URL
+
 python migrate_to_supabase.py
 ```
 
@@ -261,20 +264,24 @@ None of these source files are committed to git (see `.gitignore`), so this
 script only needs to be run from a machine that has them locally - it is not
 part of the Vercel build.
 
-### 3. Deploy the frontend to Vercel
+### 3. Deploy to Vercel
 
-[`vercel.json`](vercel.json) builds `frontend/` with Vite and serves
-`frontend/dist`. Import the GitHub repo in Vercel as-is (repo root, not
-`frontend/`) and it will pick this up automatically. Set the `VITE_API_BASE`
-env var in the Vercel project to point at wherever the backend is reachable
-(see `frontend/.env.example`) - until the backend is converted to run on
-Vercel too, this still means a separately-hosted FastAPI instance.
+[`vercel.json`](vercel.json) defines two Vercel **Services** in one project:
+`frontend` (Vite, builds `frontend/`) and `backend` (FastAPI, `backend/main.py`'s
+`app`), with a top-level rewrite sending `/api/(.*)` to the backend service and
+everything else to the frontend. Both share one domain, so the API is
+same-origin - no CORS involved in production.
+
+Import the GitHub repo in Vercel as-is (repo root). In the Vercel project's
+environment variables, set:
+- `DATABASE_URL` - the same Supabase connection string used locally, for the
+  `backend` service.
+- `VITE_API_BASE=/api` - for the `frontend` service (see `frontend/.env.example`).
 
 ---
 
 ## Performance Notes
 
-- SQLite with indexes on both drug ID columns handles 200 k+ rows in milliseconds for typical queries.
-- The matching-score precomputation is the slow step (O(n²) over all drugs) — it runs once at first startup and is skipped on subsequent restarts unless the DB is rebuilt.
-- For very large CSVs the build step batches inserts in chunks of 10,000 rows.
-- If you outgrow SQLite, swapping to PostgreSQL requires only changing the connection string and driver.
+- Postgres with indexes on both drug ID columns handles 200k+ rows in milliseconds for typical queries.
+- The matching-score precomputation is the slow step (O(n²) over all drugs) - it runs once in `migrate_to_supabase.py`, not on every app start.
+- `/api/regime/risk`'s replacement-suggestion logic batches all of its lookups (interaction edges, SE burdens, food/disease/side-effect data, matching scores) into a small, fixed number of queries per regime, regardless of how many replacement candidates a drug has - important since each query is now a network round-trip to Supabase rather than a local disk read. See `bulk_*` functions in `main.py`.

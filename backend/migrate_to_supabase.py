@@ -16,7 +16,7 @@ pooler / port 6543 recommended). See backend/.env.example.
 
 Usage:
     cd backend
-    pip install -r ../requirements.txt
+    pip install -r requirements.txt
     python migrate_to_supabase.py
 """
 

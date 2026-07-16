@@ -1,6 +1,7 @@
 """
 Builds a mapping table (cid_to_ddinter.csv) between STITCH CID drug IDs
-(from Drug_SE_DB) and DDInter drug names/IDs (from interactions.db).
+(from Drug_SE_DB) and DDInter drug names/IDs (from Supabase's interactions
+table -- requires DATABASE_URL in backend/.env).
 
 Matching strategy (in order of confidence):
   1. Exact name match (case-insensitive)
@@ -10,12 +11,16 @@ Output CSV columns: cid, cid_name, ddinter_name, match_type, score
 """
 
 import csv
-import sqlite3
 import os
 from difflib import SequenceMatcher, get_close_matches
+from pathlib import Path
+
+import psycopg
+from dotenv import load_dotenv
 
 # --- Paths ---
-DB_PATH = os.path.join(os.path.dirname(__file__), "interactions.db")
+load_dotenv(Path(__file__).parent / ".env")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 SE_DB_DIR = os.path.join(os.path.dirname(__file__), "..", "Drug_SE_DB")
 DRUG_NAMES_TSV = os.path.join(SE_DB_DIR, "drug_names.tsv")
 OUTPUT_CSV = os.path.join(os.path.dirname(__file__), "cid_to_ddinter.csv")
@@ -35,16 +40,16 @@ def load_cid_names(path: str) -> dict[str, str]:
     return mapping
 
 
-def load_ddinter_names(db_path: str) -> dict[str, int]:
-    """Returns {lowercase_name: drug_num} from interactions table."""
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT DISTINCT drug_a_name, drug_a_num FROM interactions "
-        "UNION SELECT DISTINCT drug_b_name, drug_b_num FROM interactions"
-    )
-    rows = cur.fetchall()
-    conn.close()
+def load_ddinter_names() -> dict[str, int]:
+    """Returns {lowercase_name: drug_num} from Supabase's interactions table."""
+    conn = psycopg.connect(DATABASE_URL)
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT drug_a_name, drug_a_num FROM interactions "
+            "UNION SELECT DISTINCT drug_b_name, drug_b_num FROM interactions"
+        ).fetchall()
+    finally:
+        conn.close()
     # keep first occurrence if duplicates
     names: dict[str, int] = {}
     for name, num in rows:
@@ -118,8 +123,8 @@ def main():
     cid_names = load_cid_names(DRUG_NAMES_TSV)
     print(f"  {len(cid_names)} CID entries loaded")
 
-    print("Loading DDInter drug names from interactions.db...")
-    ddinter_names = load_ddinter_names(DB_PATH)
+    print("Loading DDInter drug names from Supabase...")
+    ddinter_names = load_ddinter_names()
     print(f"  {len(ddinter_names)} unique DDInter drug names loaded")
 
     print(f"Matching (fuzzy threshold={FUZZY_THRESHOLD})...")

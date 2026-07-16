@@ -1,30 +1,28 @@
 """
 Drug Interaction Risk Scorer — FastAPI Backend
-Rebuilds SQLite DB from CSV on startup, then serves regime risk queries.
-Computes and persists pairwise drug matching scores on first run.
+Serves regime risk queries against Supabase Postgres (populated by
+migrate_to_supabase.py — this app never writes to the DB, only reads).
 """
 
-import csv
 import itertools
 import math
 import os
-import sqlite3
-import sys
-from contextlib import asynccontextmanager
 from pathlib import Path
 
+import psycopg
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from psycopg.rows import dict_row
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-CSV_PATH          = os.environ.get("DRUG_CSV",     "interactions.csv")
-FOOD_CSV_PATH     = os.environ.get("FOOD_CSV",     "drug_food.csv")
-DISEASE_CSV_PATH  = os.environ.get("DISEASE_CSV",  "drug_disease.csv")
-DB_PATH           = os.environ.get("DRUG_DB",      "interactions.db")
+load_dotenv(Path(__file__).parent / ".env")
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
 SIMILARITY_CUTOFF = float(os.environ.get("SIM_CUTOFF", "0.90"))
 
 MAX_DDI_STRENGTH = 3.0  # DDI interaction-strength scale used throughout
@@ -40,274 +38,54 @@ ENTROPY_BETA   = float(os.environ.get("ENTROPY_BETA",   "0.3"))  # Method 3 entr
 # DB helpers
 # ---------------------------------------------------------------------------
 
-def build_database(csv_path: str, db_path: str) -> None:
-    """Drop and rebuild the interactions DB from a CSV file."""
-    if not Path(csv_path).exists():
-        print(f"[warn] CSV not found at '{csv_path}' — starting with empty DB.", file=sys.stderr)
-        _init_schema(db_path)
-        return
-
-    conn = sqlite3.connect(db_path)
-    try:
-        _init_schema(db_path, conn=conn)
-        cur = conn.cursor()
-
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            first = next(reader, None)
-            if first and not _is_data_row(first):
-                rows = reader
-            else:
-                rows = itertools.chain([first], reader) if first else reader
-
-            batch = []
-            for row in rows:
-                if len(row) < 5:
-                    continue
-                drug_a_id, drug_a_name, drug_b_id, drug_b_name, strength = row[:5]
-                try:
-                    strength_f = float(strength)
-                except ValueError:
-                    continue
-                # Column 6 (index 5): mechanism of interaction.
-                # Treat missing, "Unknown", or purely numeric values as None.
-                raw_mech = row[5].strip() if len(row) > 5 else ""
-                mechanism: str | None = None
-                if raw_mech and raw_mech.lower() != "unknown":
-                    try:
-                        float(raw_mech)   # numeric-only → malformed row
-                    except ValueError:
-                        mechanism = raw_mech
-                batch.append((
-                    _id_to_num(drug_a_id.strip()), drug_a_name.strip(),
-                    _id_to_num(drug_b_id.strip()), drug_b_name.strip(),
-                    strength_f, mechanism,
-                ))
-                if len(batch) >= 10_000:
-                    cur.executemany(_INSERT_SQL, batch)
-                    batch.clear()
-            if batch:
-                cur.executemany(_INSERT_SQL, batch)
-
-        conn.commit()
-        count = conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
-        print(f"[info] Loaded {count:,} interactions into '{db_path}'.")
-    finally:
-        conn.close()
-
-
-def _is_data_row(row: list[str]) -> bool:
-    try:
-        float(row[4])
-        return True
-    except (ValueError, IndexError):
-        return False
-
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS interactions (
-    drug_a_num  INTEGER NOT NULL,
-    drug_a_name TEXT    NOT NULL,
-    drug_b_num  INTEGER NOT NULL,
-    drug_b_name TEXT    NOT NULL,
-    strength    REAL    NOT NULL,
-    mechanism   TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_a ON interactions(drug_a_num);
-CREATE INDEX IF NOT EXISTS idx_b ON interactions(drug_b_num);
-"""
-
-_INSERT_SQL = """
-INSERT INTO interactions (drug_a_num, drug_a_name, drug_b_num, drug_b_name, strength, mechanism)
-VALUES (?, ?, ?, ?, ?, ?)
-"""
-
-_MATCHING_SCHEMA = """
-CREATE TABLE IF NOT EXISTS matching_scores (
-    drug_a_num INTEGER NOT NULL,
-    drug_b_num INTEGER NOT NULL,
-    score      REAL    NOT NULL,
-    PRIMARY KEY (drug_a_num, drug_b_num)
-);
-"""
-
-
 def _id_to_num(drug_id: str) -> int:
     """Strip the 'DDInter' prefix and return the integer drug number."""
     return int(drug_id[7:])  # 'DDInter' is 7 characters
 
 
-def _init_schema(db_path: str, conn: sqlite3.Connection | None = None) -> None:
-    close = conn is None
-    if close:
-        conn = sqlite3.connect(db_path)
-    conn.executescript("DROP TABLE IF EXISTS interactions;" + _SCHEMA)
-    conn.commit()
-    if close:
-        conn.close()
-
-
-def get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+def get_conn() -> psycopg.Connection:
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
 # ---------------------------------------------------------------------------
-# Matching score computation
+# Bulk lookups
+#
+# Every function here takes a *set* of drugs (regime members, or every
+# replacement candidate for a drug at once) and does one query for the whole
+# set, instead of one query per drug/pair/candidate. This matters once every
+# query is a network round-trip to Supabase rather than a local SQLite read.
 # ---------------------------------------------------------------------------
 
-def build_matching_scores(db_path: str) -> None:
+def bulk_interaction_edges(
+    conn: psycopg.Connection, drug_ids: list[str] | set[str],
+) -> tuple[dict[str, dict[str, list[float]]], dict[tuple[str, str], str | None]]:
     """
-    Compute Sorensen-Dice matching scores for every pair of drugs and persist
-    them into matching_scores.  Skipped if the table already has rows.
+    One query: every interaction row where both drugs are in drug_ids.
+
+    A pair of drugs can have more than one row (different mechanism entries
+    for the same two drugs are common in this dataset - ~19% of pairs have
+    duplicates), so each neighbour maps to a *list* of strengths rather than
+    a single value, preserving the same duplicate-counting the old per-pair
+    queries had (each row counted once toward that neighbour's contribution
+    to the risk formula).
+
+    Returns (edges, mechanisms):
+      - edges[a][b] is symmetric: edges[a][b] and edges[b][a] both exist.
+      - mechanisms[(a, b)] picks one arbitrary mechanism per pair (matches
+        the old single-row `LIMIT 1` lookup's "any one" semantics).
     """
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.executescript(_MATCHING_SCHEMA)
-        conn.commit()
-
-        existing = conn.execute("SELECT COUNT(*) FROM matching_scores").fetchone()[0]
-        if existing > 0:
-            print(f"[info] Matching scores already present ({existing:,} rows) - skipping rebuild.")
-            return
-
-        print("[info] Building matching score lookup table...")
-
-        rows = conn.execute(
-            """
-            SELECT drug_a_num AS id, drug_b_num AS neighbor FROM interactions
-            UNION ALL
-            SELECT drug_b_num AS id, drug_a_num AS neighbor FROM interactions
-            """
-        ).fetchall()
-
-        neighbors: dict[int, set[int]] = {}
-        for row in rows:
-            drug_num     = row[0]
-            neighbor_num = row[1]
-            if drug_num not in neighbors:
-                neighbors[drug_num] = set()
-            neighbors[drug_num].add(neighbor_num)
-
-        drug_nums   = list(neighbors.keys())
-        total_pairs = len(drug_nums) * (len(drug_nums) - 1) // 2
-        print(f"[info] {len(drug_nums):,} drugs -> {total_pairs:,} pairs to score.")
-
-        batch = []
-        BATCH_SIZE = 50_000
-
-        for num_a, num_b in itertools.combinations(drug_nums, 2):
-            na = neighbors[num_a]
-            nb = neighbors[num_b]
-            denom = len(na) + len(nb)
-            score = (2 * len(na & nb) / denom) if denom > 0 else 0.0
-            lo, hi = (num_a, num_b) if num_a < num_b else (num_b, num_a)
-            batch.append((lo, hi, score))
-            if len(batch) >= BATCH_SIZE:
-                conn.executemany(
-                    "INSERT OR IGNORE INTO matching_scores VALUES (?, ?, ?)", batch
-                )
-                conn.commit()
-                batch.clear()
-
-        if batch:
-            conn.executemany(
-                "INSERT OR IGNORE INTO matching_scores VALUES (?, ?, ?)", batch
-            )
-            conn.commit()
-
-        final = conn.execute("SELECT COUNT(*) FROM matching_scores").fetchone()[0]
-        print(f"[info] Matching score table built: {final:,} rows.")
-    finally:
-        conn.close()
-
-
-def get_matching_score(conn: sqlite3.Connection, id_a: str, id_b: str) -> float | None:
-    num_a, num_b = _id_to_num(id_a), _id_to_num(id_b)
-    lo, hi = (num_a, num_b) if num_a < num_b else (num_b, num_a)
-    row = conn.execute(
-        "SELECT score FROM matching_scores WHERE drug_a_num = ? AND drug_b_num = ?",
-        (lo, hi),
-    ).fetchone()
-    return row["score"] if row else None
-
-
-# ---------------------------------------------------------------------------
-# Similarity-based replacement suggestions
-# ---------------------------------------------------------------------------
-
-def find_similar_replacements(
-    conn: sqlite3.Connection,
-    drug_id: str,
-    regime_ids: set[str],
-    cutoff: float = SIMILARITY_CUTOFF,
-) -> list[dict]:
-    drug_num = _id_to_num(drug_id)
-    rows = conn.execute(
-        """
-        SELECT 'DDInter' || ms.drug_b_num AS cand_id, ms.score
-        FROM matching_scores ms
-        WHERE ms.drug_a_num = ? AND ms.score >= ?
-        UNION ALL
-        SELECT 'DDInter' || ms.drug_a_num AS cand_id, ms.score
-        FROM matching_scores ms
-        WHERE ms.drug_b_num = ? AND ms.score >= ?
-        """,
-        (drug_num, cutoff, drug_num, cutoff),
-    ).fetchall()
-
-    results = []
-    for row in rows:
-        cand_id = row[0]
-        if cand_id in regime_ids:
-            continue
-        cand_num = _id_to_num(cand_id)
-        info_row = conn.execute(
-            """
-            SELECT
-                COUNT(*) AS cnt,
-                COALESCE(
-                    MAX(CASE WHEN drug_a_num = ? THEN drug_a_name END),
-                    MAX(CASE WHEN drug_b_num = ? THEN drug_b_name END)
-                ) AS name
-            FROM interactions
-            WHERE drug_a_num = ? OR drug_b_num = ?
-            """,
-            (cand_num, cand_num, cand_num, cand_num),
-        ).fetchone()
-        results.append({
-            "id":                cand_id,
-            "name":              info_row["name"] if info_row else cand_id,
-            "score":             row[1],
-            "interaction_count": info_row["cnt"]  if info_row else 0,
-            "foods":             get_food_interactions(conn, cand_id),
-            "diseases":          get_disease_interactions(conn, cand_id),
-            "side_effects":      get_side_effects(conn, cand_id),
-        })
-
-    results.sort(key=lambda r: r["interaction_count"], reverse=True)
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Risk calculation helpers
-# ---------------------------------------------------------------------------
-
-def regime_pairwise_strengths(conn: sqlite3.Connection, drug_ids: list[str]) -> dict[str, list[float]]:
-    """
-    One query for the whole regime: for every drug, the DDI strengths
-    (0-3 scale) of its interactions with the other drugs in the regime.
-    """
-    result: dict[str, list[float]] = {did: [] for did in drug_ids}
-    if len(drug_ids) < 2:
-        return result
-    num_to_id = {_id_to_num(did): did for did in drug_ids}
+    ids = list(drug_ids)
+    num_to_id = {_id_to_num(did): did for did in ids}
     nums = list(num_to_id.keys())
-    placeholders = ",".join("?" * len(nums))
+    edges: dict[str, dict[str, list[float]]] = {did: {} for did in ids}
+    mechanisms: dict[tuple[str, str], str | None] = {}
+    if len(nums) < 2:
+        return edges, mechanisms
+
+    placeholders = ",".join(["%s"] * len(nums))
     rows = conn.execute(
         f"""
-        SELECT drug_a_num, drug_b_num, strength
+        SELECT drug_a_num, drug_b_num, strength, mechanism
         FROM interactions
         WHERE drug_a_num IN ({placeholders}) AND drug_b_num IN ({placeholders})
         """,
@@ -318,17 +96,32 @@ def regime_pairwise_strengths(conn: sqlite3.Connection, drug_ids: list[str]) -> 
         b_id = num_to_id.get(row["drug_b_num"])
         if a_id is None or b_id is None or a_id == b_id:
             continue
-        result[a_id].append(row["strength"])
-        result[b_id].append(row["strength"])
-    return result
+        edges[a_id].setdefault(b_id, []).append(row["strength"])
+        edges[b_id].setdefault(a_id, []).append(row["strength"])
+        mechanisms.setdefault((a_id, b_id), row["mechanism"])
+        mechanisms.setdefault((b_id, a_id), row["mechanism"])
+    return edges, mechanisms
 
 
-def regime_se_burdens(conn: sqlite3.Connection, drug_ids: list[str]) -> dict[str, list[float]]:
-    """One query for the whole regime: each drug's known side-effect frequencies (0-1 scale)."""
-    result: dict[str, list[float]] = {did: [] for did in drug_ids}
-    num_to_id = {_id_to_num(did): did for did in drug_ids}
+def _neighbor_strengths(
+    edges_for_drug: dict[str, list[float]], member_set: set[str] | None = None,
+) -> list[float]:
+    """Flatten a drug's {neighbour: [strengths]} edges into one list, optionally restricted to member_set."""
+    items = edges_for_drug.items() if member_set is None else (
+        (other, lst) for other, lst in edges_for_drug.items() if other in member_set
+    )
+    return [s for _, lst in items for s in lst]
+
+
+def regime_se_burdens(conn: psycopg.Connection, drug_ids: list[str] | set[str]) -> dict[str, list[float]]:
+    """One query for the whole set: each drug's known side-effect frequencies (0-1 scale)."""
+    ids = list(drug_ids)
+    result: dict[str, list[float]] = {did: [] for did in ids}
+    num_to_id = {_id_to_num(did): did for did in ids}
     nums = list(num_to_id.keys())
-    placeholders = ",".join("?" * len(nums))
+    if not nums:
+        return result
+    placeholders = ",".join(["%s"] * len(nums))
     rows = conn.execute(
         f"""
         SELECT ddinter_num, freq_upper
@@ -343,6 +136,198 @@ def regime_se_burdens(conn: sqlite3.Connection, drug_ids: list[str]) -> dict[str
             result[did].append(row["freq_upper"])
     return result
 
+
+def bulk_matching_scores(conn: psycopg.Connection, drug_ids: list[str] | set[str]) -> dict[tuple[str, str], float]:
+    """One query: Sorensen-Dice matching score for every pair within drug_ids (symmetric)."""
+    ids = list(drug_ids)
+    num_to_id = {_id_to_num(did): did for did in ids}
+    nums = list(num_to_id.keys())
+    scores: dict[tuple[str, str], float] = {}
+    if len(nums) < 2:
+        return scores
+    placeholders = ",".join(["%s"] * len(nums))
+    rows = conn.execute(
+        f"""
+        SELECT drug_a_num, drug_b_num, score
+        FROM matching_scores
+        WHERE drug_a_num IN ({placeholders}) AND drug_b_num IN ({placeholders})
+        """,
+        nums + nums,
+    ).fetchall()
+    for row in rows:
+        a_id = num_to_id.get(row["drug_a_num"])
+        b_id = num_to_id.get(row["drug_b_num"])
+        if a_id is None or b_id is None:
+            continue
+        scores[(a_id, b_id)] = row["score"]
+        scores[(b_id, a_id)] = row["score"]
+    return scores
+
+
+def bulk_candidate_info(conn: psycopg.Connection, drug_nums: list[int]) -> dict[int, tuple[int, str]]:
+    """One query: total interaction count + a display name, per drug number."""
+    if not drug_nums:
+        return {}
+    placeholders = ",".join(["%s"] * len(drug_nums))
+    rows = conn.execute(
+        f"""
+        SELECT num, COUNT(*) AS cnt, MAX(name) AS name FROM (
+            SELECT drug_a_num AS num, drug_a_name AS name FROM interactions WHERE drug_a_num IN ({placeholders})
+            UNION ALL
+            SELECT drug_b_num AS num, drug_b_name AS name FROM interactions WHERE drug_b_num IN ({placeholders})
+        ) t
+        GROUP BY num
+        """,
+        drug_nums + drug_nums,
+    ).fetchall()
+    return {row["num"]: (row["cnt"], row["name"]) for row in rows}
+
+
+def bulk_food_interactions(conn: psycopg.Connection, drug_nums: list[int]) -> dict[int, list[dict]]:
+    result: dict[int, list[dict]] = {n: [] for n in drug_nums}
+    if not drug_nums:
+        return result
+    placeholders = ",".join(["%s"] * len(drug_nums))
+    rows = conn.execute(
+        f"""
+        SELECT drug_num, food_name, severity, description, management, mechanism
+        FROM food_interactions
+        WHERE drug_num IN ({placeholders})
+        ORDER BY drug_num, severity DESC, food_name ASC
+        """,
+        drug_nums,
+    ).fetchall()
+    for row in rows:
+        result[row["drug_num"]].append({
+            "food_name":   row["food_name"],
+            "severity":    row["severity"],
+            "description": row["description"],
+            "management":  row["management"],
+            "mechanism":   row["mechanism"],
+        })
+    return result
+
+
+def bulk_disease_interactions(conn: psycopg.Connection, drug_nums: list[int]) -> dict[int, list[dict]]:
+    result: dict[int, list[dict]] = {n: [] for n in drug_nums}
+    if not drug_nums:
+        return result
+    placeholders = ",".join(["%s"] * len(drug_nums))
+    rows = conn.execute(
+        f"""
+        SELECT drug_num, disease_name, severity, text
+        FROM disease_interactions
+        WHERE drug_num IN ({placeholders})
+        ORDER BY drug_num, severity DESC, disease_name ASC
+        """,
+        drug_nums,
+    ).fetchall()
+    for row in rows:
+        result[row["drug_num"]].append({
+            "disease_name": row["disease_name"],
+            "severity":     row["severity"],
+            "text":         row["text"],
+        })
+    return result
+
+
+def bulk_side_effects(conn: psycopg.Connection, drug_nums: list[int], limit: int = 50) -> dict[int, list[dict]]:
+    """Side effects per drug, ordered by descending frequency, capped at `limit` per drug."""
+    result: dict[int, list[dict]] = {n: [] for n in drug_nums}
+    if not drug_nums:
+        return result
+    placeholders = ",".join(["%s"] * len(drug_nums))
+    rows = conn.execute(
+        f"""
+        SELECT ddinter_num, se_name, freq_lower, freq_upper, freq_label
+        FROM side_effects
+        WHERE ddinter_num IN ({placeholders})
+          AND (freq_upper IS NULL OR freq_upper > 0)
+          AND (freq_lower IS NULL OR freq_lower > 0)
+        ORDER BY
+          ddinter_num,
+          CASE freq_label
+            WHEN 'very common'   THEN 10
+            WHEN 'common'        THEN 20
+            WHEN 'frequent'      THEN 30
+            WHEN 'uncommon'      THEN 40
+            WHEN 'infrequent'    THEN 50
+            WHEN 'rare'          THEN 60
+            WHEN 'very rare'     THEN 70
+            ELSE 80
+          END,
+          freq_lower DESC NULLS LAST,
+          se_name ASC
+        """,
+        drug_nums,
+    ).fetchall()
+    for row in rows:
+        bucket = result[row["ddinter_num"]]
+        if len(bucket) < limit:
+            bucket.append({
+                "se_name":    row["se_name"],
+                "freq_lower": row["freq_lower"],
+                "freq_upper": row["freq_upper"],
+                "freq_label": row["freq_label"],
+            })
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Similarity-based replacement suggestions
+# ---------------------------------------------------------------------------
+
+def find_similar_replacements(
+    conn: psycopg.Connection,
+    drug_id: str,
+    regime_ids: set[str],
+    cutoff: float = SIMILARITY_CUTOFF,
+) -> list[dict]:
+    drug_num = _id_to_num(drug_id)
+    rows = conn.execute(
+        """
+        SELECT 'DDInter' || ms.drug_b_num AS cand_id, ms.score
+        FROM matching_scores ms
+        WHERE ms.drug_a_num = %s AND ms.score >= %s
+        UNION ALL
+        SELECT 'DDInter' || ms.drug_a_num AS cand_id, ms.score
+        FROM matching_scores ms
+        WHERE ms.drug_b_num = %s AND ms.score >= %s
+        """,
+        (drug_num, cutoff, drug_num, cutoff),
+    ).fetchall()
+
+    candidates = [(row["cand_id"], row["score"]) for row in rows if row["cand_id"] not in regime_ids]
+    if not candidates:
+        return []
+
+    cand_nums = [_id_to_num(cid) for cid, _ in candidates]
+    info            = bulk_candidate_info(conn, cand_nums)
+    foods_by_num    = bulk_food_interactions(conn, cand_nums)
+    diseases_by_num = bulk_disease_interactions(conn, cand_nums)
+    se_by_num       = bulk_side_effects(conn, cand_nums)
+
+    results = []
+    for cand_id, score in candidates:
+        cand_num = _id_to_num(cand_id)
+        cnt, name = info.get(cand_num, (0, cand_id))
+        results.append({
+            "id":                cand_id,
+            "name":              name,
+            "score":             score,
+            "interaction_count": cnt,
+            "foods":             foods_by_num.get(cand_num, []),
+            "diseases":          diseases_by_num.get(cand_num, []),
+            "side_effects":      se_by_num.get(cand_num, []),
+        })
+
+    results.sort(key=lambda r: r["interaction_count"], reverse=True)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Risk calculation
+# ---------------------------------------------------------------------------
 
 def compounding_risk(
     ddi_strengths: list[float],
@@ -412,34 +397,33 @@ def blended_method_risk(
     return weight * m1 + (1.0 - weight) * m3
 
 
-def calc_normalized_risk(
-    conn: sqlite3.Connection,
-    drug_ids: list[str],
+def regime_risk_from_edges(
+    member_ids: list[str],
+    edges: dict[str, dict[str, list[float]]],
+    burdens: dict[str, list[float]],
     weight: float = RISK_METHOD_WEIGHT,
-) -> float | None:
-    if not drug_ids:
-        return None
-    strengths = regime_pairwise_strengths(conn, drug_ids)
-    burdens   = regime_se_burdens(conn, drug_ids)
-    risks = [blended_method_risk(strengths[did], burdens[did], weight=weight) for did in drug_ids]
+) -> float:
+    """
+    Average blended risk over member_ids, using already-fetched edges/burdens
+    (restricted to member_ids) instead of issuing fresh queries. Used to score
+    hypothetical substitute regimes (one drug swapped for a replacement
+    candidate) without a DB round-trip per candidate.
+    """
+    if not member_ids:
+        return 0.0
+    member_set = set(member_ids)
+    risks = [
+        blended_method_risk(
+            _neighbor_strengths(edges.get(did, {}), member_set),
+            burdens.get(did, []),
+            weight=weight,
+        )
+        for did in member_ids
+    ]
     return sum(risks) / len(risks)
 
 
-def pair_has_interaction(conn: sqlite3.Connection, id_a: str, id_b: str) -> bool:
-    num_a, num_b = _id_to_num(id_a), _id_to_num(id_b)
-    row = conn.execute(
-        """
-        SELECT 1 FROM interactions
-        WHERE (drug_a_num = ? AND drug_b_num = ?)
-           OR (drug_a_num = ? AND drug_b_num = ?)
-        LIMIT 1
-        """,
-        (num_a, num_b, num_b, num_a),
-    ).fetchone()
-    return row is not None
-
-
-def resolve_drug(conn: sqlite3.Connection, query: str) -> dict | None:
+def resolve_drug(conn: psycopg.Connection, query: str) -> dict | None:
     num: int | None = None
     if query.upper().startswith("DDINTER"):
         try:
@@ -451,7 +435,7 @@ def resolve_drug(conn: sqlite3.Connection, query: str) -> dict | None:
         row = conn.execute(
             """
             SELECT 'DDInter' || drug_a_num AS id, drug_a_name AS name
-            FROM interactions WHERE drug_a_num = ? LIMIT 1
+            FROM interactions WHERE drug_a_num = %s LIMIT 1
             """,
             (num,),
         ).fetchone()
@@ -459,7 +443,7 @@ def resolve_drug(conn: sqlite3.Connection, query: str) -> dict | None:
             row = conn.execute(
                 """
                 SELECT 'DDInter' || drug_b_num AS id, drug_b_name AS name
-                FROM interactions WHERE drug_b_num = ? LIMIT 1
+                FROM interactions WHERE drug_b_num = %s LIMIT 1
                 """,
                 (num,),
             ).fetchone()
@@ -467,7 +451,7 @@ def resolve_drug(conn: sqlite3.Connection, query: str) -> dict | None:
         row = conn.execute(
             """
             SELECT 'DDInter' || drug_a_num AS id, drug_a_name AS name
-            FROM interactions WHERE LOWER(drug_a_name) = LOWER(?) LIMIT 1
+            FROM interactions WHERE LOWER(drug_a_name) = LOWER(%s) LIMIT 1
             """,
             (query,),
         ).fetchone()
@@ -475,14 +459,14 @@ def resolve_drug(conn: sqlite3.Connection, query: str) -> dict | None:
             row = conn.execute(
                 """
                 SELECT 'DDInter' || drug_b_num AS id, drug_b_name AS name
-                FROM interactions WHERE LOWER(drug_b_name) = LOWER(?) LIMIT 1
+                FROM interactions WHERE LOWER(drug_b_name) = LOWER(%s) LIMIT 1
                 """,
                 (query,),
             ).fetchone()
     return dict(row) if row else None
 
 
-def search_drugs(conn: sqlite3.Connection, query: str, limit: int = 10) -> list[dict]:
+def search_drugs(conn: psycopg.Connection, query: str, limit: int = 10) -> list[dict]:
     pattern = f"%{query}%"
     # If query is purely numeric, also match by DDInter number
     num_filter = query.strip().lstrip("0") or "0"
@@ -491,216 +475,16 @@ def search_drugs(conn: sqlite3.Connection, query: str, limit: int = 10) -> list[
         """
         SELECT DISTINCT 'DDInter' || drug_a_num AS id, drug_a_name AS name
         FROM interactions
-        WHERE LOWER(drug_a_name) LIKE LOWER(?)
-           OR (? AND CAST(drug_a_num AS TEXT) = ?)
+        WHERE LOWER(drug_a_name) LIKE LOWER(%s)
+           OR (%s AND CAST(drug_a_num AS TEXT) = %s)
         UNION
         SELECT DISTINCT 'DDInter' || drug_b_num AS id, drug_b_name AS name
         FROM interactions
-        WHERE LOWER(drug_b_name) LIKE LOWER(?)
-           OR (? AND CAST(drug_b_num AS TEXT) = ?)
-        LIMIT ?
+        WHERE LOWER(drug_b_name) LIKE LOWER(%s)
+           OR (%s AND CAST(drug_b_num AS TEXT) = %s)
+        LIMIT %s
         """,
         (pattern, is_numeric, num_filter, pattern, is_numeric, num_filter, limit),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Drug-food interaction loading
-# ---------------------------------------------------------------------------
-
-_FOOD_SCHEMA = """
-CREATE TABLE IF NOT EXISTS food_interactions (
-    drug_num    INTEGER NOT NULL,
-    food_name   TEXT    NOT NULL,
-    severity    INTEGER NOT NULL,
-    description TEXT    NOT NULL,
-    management  TEXT    NOT NULL,
-    mechanism   TEXT    NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_food_drug ON food_interactions(drug_num);
-"""
-
-_FOOD_INSERT_SQL = """
-INSERT INTO food_interactions (drug_num, food_name, severity, description, management, mechanism)
-VALUES (?, ?, ?, ?, ?, ?)
-"""
-
-
-def build_food_database(csv_path: str, db_path: str) -> None:
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.executescript("DROP TABLE IF EXISTS food_interactions;" + _FOOD_SCHEMA)
-        conn.commit()
-
-        if not Path(csv_path).exists():
-            print(f"[warn] Food CSV not found at '{csv_path}' — food interactions disabled.", file=sys.stderr)
-            return
-
-        cur = conn.cursor()
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            batch = []
-            skipped = 0
-            for row in reader:
-                sev_raw = (row.get("Severity level") or "").strip()
-                try:
-                    severity = int(sev_raw)
-                except ValueError:
-                    skipped += 1
-                    continue
-                drug_id_str = (row.get("drug_id") or "").strip()
-                if not drug_id_str or not drug_id_str.upper().startswith("DDINTER"):
-                    skipped += 1
-                    continue
-                try:
-                    drug_num = _id_to_num(drug_id_str)
-                except (ValueError, IndexError):
-                    skipped += 1
-                    continue
-                batch.append((
-                    drug_num,
-                    (row.get("Food name") or "").strip(),
-                    severity,
-                    (row.get("Description") or "").strip(),
-                    (row.get("Management") or "").strip(),
-                    (row.get("Mechanism") or "").strip(),
-                ))
-            if batch:
-                cur.executemany(_FOOD_INSERT_SQL, batch)
-
-        conn.commit()
-        count = conn.execute("SELECT COUNT(*) FROM food_interactions").fetchone()[0]
-        print(f"[info] Loaded {count:,} drug-food interactions ({skipped:,} rows skipped).")
-    finally:
-        conn.close()
-
-
-def get_food_interactions(conn: sqlite3.Connection, drug_id: str) -> list[dict]:
-    drug_num = _id_to_num(drug_id)
-    rows = conn.execute(
-        """
-        SELECT food_name, severity, description, management, mechanism
-        FROM food_interactions
-        WHERE drug_num = ?
-        ORDER BY severity DESC, food_name ASC
-        """,
-        (drug_num,),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-# ---------------------------------------------------------------------------
-# Drug-disease interaction loading
-# ---------------------------------------------------------------------------
-
-_DISEASE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS disease_interactions (
-    drug_num     INTEGER NOT NULL,
-    disease_name TEXT    NOT NULL,
-    severity     INTEGER NOT NULL,
-    text         TEXT    NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_disease_drug ON disease_interactions(drug_num);
-"""
-
-_DISEASE_INSERT_SQL = """
-INSERT INTO disease_interactions (drug_num, disease_name, severity, text)
-VALUES (?, ?, ?, ?)
-"""
-
-
-def build_disease_database(csv_path: str, db_path: str) -> None:
-    conn = sqlite3.connect(db_path)
-    try:
-        conn.executescript("DROP TABLE IF EXISTS disease_interactions;" + _DISEASE_SCHEMA)
-        conn.commit()
-
-        if not Path(csv_path).exists():
-            print(f"[warn] Disease CSV not found at '{csv_path}' — disease interactions disabled.", file=sys.stderr)
-            return
-
-        cur = conn.cursor()
-        with open(csv_path, newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            batch = []
-            skipped = 0
-            for row in reader:
-                sev_raw = (row.get("Severity level") or "").strip()
-                try:
-                    severity = int(sev_raw)
-                except ValueError:
-                    skipped += 1
-                    continue
-                drug_id_str = (row.get("drug_id") or "").strip()
-                if not drug_id_str or not drug_id_str.upper().startswith("DDINTER"):
-                    skipped += 1
-                    continue
-                try:
-                    drug_num = _id_to_num(drug_id_str)
-                except (ValueError, IndexError):
-                    skipped += 1
-                    continue
-                batch.append((
-                    drug_num,
-                    (row.get("Disease name") or "").strip(),
-                    severity,
-                    (row.get("Text") or "").strip(),
-                ))
-            if batch:
-                cur.executemany(_DISEASE_INSERT_SQL, batch)
-
-        conn.commit()
-        count = conn.execute("SELECT COUNT(*) FROM disease_interactions").fetchone()[0]
-        print(f"[info] Loaded {count:,} drug-disease interactions ({skipped:,} rows skipped).")
-    finally:
-        conn.close()
-
-
-def get_disease_interactions(conn: sqlite3.Connection, drug_id: str) -> list[dict]:
-    drug_num = _id_to_num(drug_id)
-    rows = conn.execute(
-        """
-        SELECT disease_name, severity, text
-        FROM disease_interactions
-        WHERE drug_num = ?
-        ORDER BY severity DESC, disease_name ASC
-        """,
-        (drug_num,),
-    ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def get_side_effects(
-    conn: sqlite3.Connection,
-    drug_id: str,
-    limit: int = 50,
-) -> list[dict]:
-    """Return side effects for a drug ordered by descending frequency upper bound."""
-    drug_num = _id_to_num(drug_id)
-    rows = conn.execute(
-        """
-        SELECT se_name, freq_lower, freq_upper, freq_label
-        FROM side_effects
-        WHERE ddinter_num = ?
-          AND (freq_upper IS NULL OR freq_upper > 0)
-          AND (freq_lower IS NULL OR freq_lower > 0)
-        ORDER BY
-          CASE freq_label
-            WHEN 'very common'   THEN 10
-            WHEN 'common'        THEN 20
-            WHEN 'frequent'      THEN 30
-            WHEN 'uncommon'      THEN 40
-            WHEN 'infrequent'    THEN 50
-            WHEN 'rare'          THEN 60
-            WHEN 'very rare'     THEN 70
-            ELSE 80
-          END,
-          freq_lower DESC NULLS LAST,
-          se_name ASC
-        LIMIT ?
-        """,
-        (drug_num, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -709,16 +493,7 @@ def get_side_effects(
 # FastAPI app
 # ---------------------------------------------------------------------------
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    build_database(CSV_PATH, DB_PATH)
-    build_matching_scores(DB_PATH)
-    build_food_database(FOOD_CSV_PATH, DB_PATH)
-    build_disease_database(DISEASE_CSV_PATH, DB_PATH)
-    yield
-
-
-app = FastAPI(title="Drug Interaction Risk Scorer", lifespan=lifespan)
+app = FastAPI(title="Drug Interaction Risk Scorer")
 
 app.add_middleware(
     CORSMiddleware,
@@ -832,17 +607,17 @@ class RegimeResponse(BaseModel):
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/health")
+@app.get("/api/health")
 def health():
     conn = get_conn()
     try:
-        count = conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
+        count = conn.execute("SELECT COUNT(*) FROM interactions").fetchone()["count"]
     finally:
         conn.close()
     return {"status": "ok", "interactions": count}
 
 
-@app.get("/search")
+@app.get("/api/search")
 def search(q: str, limit: int = 10):
     if len(q) < 2:
         return []
@@ -853,14 +628,14 @@ def search(q: str, limit: int = 10):
         conn.close()
 
 
-@app.get("/drugs/{drug_id}/side_effects", response_model=DrugSideEffects)
+@app.get("/api/drugs/{drug_id}/side_effects", response_model=DrugSideEffects)
 def drug_side_effects(drug_id: str, limit: int = 50):
     conn = get_conn()
     try:
         drug = resolve_drug(conn, drug_id)
         if not drug:
             raise HTTPException(status_code=404, detail=f"Drug '{drug_id}' not found")
-        effects = get_side_effects(conn, drug["id"], limit=limit)
+        effects = bulk_side_effects(conn, [_id_to_num(drug["id"])], limit=limit)[_id_to_num(drug["id"])]
         return DrugSideEffects(
             drug_id=drug["id"],
             drug_name=drug["name"],
@@ -870,7 +645,7 @@ def drug_side_effects(drug_id: str, limit: int = 50):
         conn.close()
 
 
-@app.post("/regime/risk", response_model=RegimeResponse)
+@app.post("/api/regime/risk", response_model=RegimeResponse)
 def regime_risk(req: RegimeRequest):
     if not req.drug_ids:
         raise HTTPException(status_code=400, detail="drug_ids must not be empty")
@@ -889,21 +664,22 @@ def regime_risk(req: RegimeRequest):
                 unknown.append(q)
 
         resolved_ids = [d["id"] for d in resolved]
-
-        # Batched: one query for all pairwise DDI strengths and one for all
-        # SE burdens across the whole regime, instead of a query per drug.
-        regime_strengths = regime_pairwise_strengths(conn, resolved_ids)
-        regime_burdens   = regime_se_burdens(conn, resolved_ids)
-
         eff_weight = req.risk_method_weight if req.risk_method_weight is not None else RISK_METHOD_WEIGHT
+
+        # Batched: one query for every interaction edge (+ mechanism) among
+        # regime drugs, one for SE burdens, one for matching scores -- covers
+        # drug_risks, pair_scores, and coverage without a query per pair.
+        edges, mechanisms = bulk_interaction_edges(conn, resolved_ids)
+        burdens           = regime_se_burdens(conn, resolved_ids)
+        match_scores      = bulk_matching_scores(conn, resolved_ids)
 
         drug_risks: list[DrugRisk] = []
         for drug in resolved:
-            strengths = regime_strengths[drug["id"]]
-            burdens   = regime_burdens[drug["id"]]
+            strengths = _neighbor_strengths(edges[drug["id"]])
+            drug_burdens = burdens[drug["id"]]
             avg    = sum(strengths) / len(strengths) if strengths else None
-            burden = sum(burdens) / len(burdens) if burdens else None
-            risk_val = blended_method_risk(strengths, burdens, weight=eff_weight)
+            burden = sum(drug_burdens) / len(drug_burdens) if drug_burdens else None
+            risk_val = blended_method_risk(strengths, drug_burdens, weight=eff_weight)
             drug_risks.append(DrugRisk(
                 id=drug["id"],
                 name=drug["name"],
@@ -921,48 +697,42 @@ def regime_risk(req: RegimeRequest):
         regime_set = set(ids)
         pairs      = list(itertools.combinations(ids, 2))
         possible   = len(pairs)
-        populated  = sum(1 for a, b in pairs if pair_has_interaction(conn, a, b))
+        populated  = sum(1 for a, b in pairs if b in edges.get(a, {}))
         coverage   = (populated / possible * 100) if possible > 0 else 0.0
 
-        pair_scores: list[PairScore] = []
-        for id_a, id_b in pairs:
-            score = get_matching_score(conn, id_a, id_b)
-            na, nb = _id_to_num(id_a), _id_to_num(id_b)
-            mech_row = conn.execute(
-                """
-                SELECT mechanism FROM interactions
-                WHERE (drug_a_num = ? AND drug_b_num = ?)
-                   OR (drug_a_num = ? AND drug_b_num = ?)
-                LIMIT 1
-                """,
-                (na, nb, nb, na),
-            ).fetchone()
-            mechanism = mech_row["mechanism"] if mech_row else None
-            pair_scores.append(PairScore(
+        pair_scores: list[PairScore] = [
+            PairScore(
                 drug_a_id=id_a,
                 drug_a_name=names[id_a],
                 drug_b_id=id_b,
                 drug_b_name=names[id_b],
-                score=score,
-                mechanism=mechanism,
-            ))
+                score=match_scores.get((id_a, id_b)),
+                mechanism=mechanisms.get((id_a, id_b)),
+            )
+            for id_a, id_b in pairs
+        ]
+
+        regime_nums = [_id_to_num(d["id"]) for d in resolved]
+        orig_counts = bulk_candidate_info(conn, regime_nums)
 
         similar_replacements: list[DrugReplacements] = []
         for drug in resolved:
             candidates = find_similar_replacements(conn, drug["id"], regime_set)
-            drug_num = _id_to_num(drug["id"])
-            orig_count_row = conn.execute(
-                "SELECT COUNT(*) AS cnt FROM interactions WHERE drug_a_num = ? OR drug_b_num = ?",
-                (drug_num, drug_num),
-            ).fetchone()
-            orig_count = orig_count_row["cnt"] if orig_count_row else 0
+            orig_count = orig_counts.get(_id_to_num(drug["id"]), (0, drug["name"]))[0]
 
-            # For each candidate, compute regime risk with this drug swapped out
-            substitute_regime = [rid for rid in resolved_ids if rid != drug["id"]]
+            # For each candidate, compute regime risk with this drug swapped
+            # out -- batched: one query for the union of {base regime, every
+            # candidate} instead of one query pair per candidate.
+            base_ids      = [rid for rid in resolved_ids if rid != drug["id"]]
+            candidate_ids = [c["id"] for c in candidates]
+            union_ids     = list(set(base_ids) | set(candidate_ids))
+            sub_edges, _  = bulk_interaction_edges(conn, union_ids)
+            sub_burdens   = regime_se_burdens(conn, union_ids)
+
             replacement_objects: list[ReplacementCandidate] = []
             for c in candidates:
-                sub_ids = substitute_regime + [c["id"]]
-                sub_risk = calc_normalized_risk(conn, sub_ids, weight=eff_weight)
+                sub_ids = base_ids + [c["id"]]
+                sub_risk = regime_risk_from_edges(sub_ids, sub_edges, sub_burdens, weight=eff_weight)
                 replacement_objects.append(ReplacementCandidate(
                     **c,
                     substitute_risk=round(sub_risk, 6) if sub_risk is not None else None,
@@ -975,32 +745,32 @@ def regime_risk(req: RegimeRequest):
                 replacements=replacement_objects,
             ))
 
-        food_interactions: list[DrugFoodInteractions] = []
-        for drug in resolved:
-            foods = get_food_interactions(conn, drug["id"])
-            food_interactions.append(DrugFoodInteractions(
-                drug_id=drug["id"],
-                drug_name=drug["name"],
-                foods=[FoodInteraction(**f) for f in foods],
-            ))
+        # Main regime's own food/disease/side-effect displays, batched.
+        foods_by_num    = bulk_food_interactions(conn, regime_nums)
+        diseases_by_num = bulk_disease_interactions(conn, regime_nums)
+        se_by_num       = bulk_side_effects(conn, regime_nums)
 
-        disease_interactions: list[DrugDiseaseInteractions] = []
-        for drug in resolved:
-            diseases = get_disease_interactions(conn, drug["id"])
-            disease_interactions.append(DrugDiseaseInteractions(
-                drug_id=drug["id"],
-                drug_name=drug["name"],
-                diseases=[DiseaseInteraction(**d) for d in diseases],
-            ))
-
-        side_effects: list[DrugSideEffects] = []
-        for drug in resolved:
-            effects = get_side_effects(conn, drug["id"])
-            side_effects.append(DrugSideEffects(
-                drug_id=drug["id"],
-                drug_name=drug["name"],
-                side_effects=[SideEffect(**e) for e in effects],
-            ))
+        food_interactions = [
+            DrugFoodInteractions(
+                drug_id=d["id"], drug_name=d["name"],
+                foods=[FoodInteraction(**f) for f in foods_by_num.get(_id_to_num(d["id"]), [])],
+            )
+            for d in resolved
+        ]
+        disease_interactions = [
+            DrugDiseaseInteractions(
+                drug_id=d["id"], drug_name=d["name"],
+                diseases=[DiseaseInteraction(**x) for x in diseases_by_num.get(_id_to_num(d["id"]), [])],
+            )
+            for d in resolved
+        ]
+        side_effects = [
+            DrugSideEffects(
+                drug_id=d["id"], drug_name=d["name"],
+                side_effects=[SideEffect(**x) for x in se_by_num.get(_id_to_num(d["id"]), [])],
+            )
+            for d in resolved
+        ]
 
         return RegimeResponse(
             drugs=drug_risks,
