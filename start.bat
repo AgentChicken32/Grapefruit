@@ -154,6 +154,23 @@ if errorlevel 1 (
 )
 
 :: ------------------------------------------------------------
+:: STEP 3d -- Score side effect severity with LLM if not already done
+:: ------------------------------------------------------------
+"%VENV%\Scripts\python.exe" -c "import sqlite3; conn=sqlite3.connect('%BACKEND%\interactions.db'); r=conn.execute(\"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='side_effects'\").fetchone(); s=conn.execute(\"SELECT COUNT(*) FROM side_effects WHERE severity IS NOT NULL\").fetchone() if r[0]>0 else [0]; exit(0 if s[0]>0 else 1)" 2>nul
+if errorlevel 1 (
+    if defined ANTHROPIC_API_KEY (
+        echo [SETUP] Side effect severity not scored -- running score_se_severity.py ...
+        "%VENV%\Scripts\python.exe" "%BACKEND%\score_se_severity.py"
+        if errorlevel 1 ( echo  WARNING: score_se_severity.py failed -- continuing without severity scores. )
+    ) else (
+        echo [SKIP] ANTHROPIC_API_KEY not set -- skipping LLM severity scoring.
+        echo        Set ANTHROPIC_API_KEY and re-run start.bat to score side effects.
+    )
+) else (
+    echo [SETUP] Side effect severity scores already present -- skipping.
+)
+
+:: ------------------------------------------------------------
 :: STEP 4 -- Launch frontend
 :: ------------------------------------------------------------
 echo [START] Launching frontend window...

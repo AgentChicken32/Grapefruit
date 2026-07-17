@@ -23,6 +23,7 @@ from pydantic import BaseModel
 CSV_PATH          = os.environ.get("DRUG_CSV",     "interactions.csv")
 FOOD_CSV_PATH     = os.environ.get("FOOD_CSV",     "drug_food.csv")
 DISEASE_CSV_PATH  = os.environ.get("DISEASE_CSV",  "drug_disease.csv")
+PREDICTED_CSV_PATH = os.environ.get("PREDICTED_CSV", "predicted_interactions.csv")
 DB_PATH           = os.environ.get("DRUG_DB",      "interactions.db")
 SIMILARITY_CUTOFF = float(os.environ.get("SIM_CUTOFF", "0.90"))
 # Weight given to side-effect burden vs drug-drug interaction strength (0–1).
@@ -581,15 +582,112 @@ def get_disease_interactions(conn: sqlite3.Connection, drug_id: str) -> list[dic
     return [dict(r) for r in rows]
 
 
+# ---------------------------------------------------------------------------
+# Predicted (AI-generated) interaction loading
+#
+# These come from the offline pipeline in backend/ddi_predict/ — a GCN link
+# predictor trained on the verified DDInter graph, using OpenAI SMILES
+# embeddings as node features (see ddi_predict/README.md). They are NOT
+# clinically verified and must never influence strength/risk/coverage
+# calculations, which stay derived solely from the `interactions` table.
+# ---------------------------------------------------------------------------
+
+def _predicted_advisory(method: str) -> str:
+    return (
+        f"Predicted by an AI model ({method}, trained on the known DDInter "
+        "interaction graph using SMILES-based drug embeddings) — not a "
+        "clinically verified interaction."
+    )
+
+_PREDICTED_SCHEMA = """
+CREATE TABLE IF NOT EXISTS predicted_interactions (
+    drug_a_num   INTEGER NOT NULL,
+    drug_b_num   INTEGER NOT NULL,
+    confidence   REAL    NOT NULL,
+    method       TEXT    NOT NULL,
+    generated_at TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pred_a ON predicted_interactions(drug_a_num);
+CREATE INDEX IF NOT EXISTS idx_pred_b ON predicted_interactions(drug_b_num);
+"""
+
+_PREDICTED_INSERT_SQL = """
+INSERT INTO predicted_interactions (drug_a_num, drug_b_num, confidence, method, generated_at)
+VALUES (?, ?, ?, ?, ?)
+"""
+
+
+def build_predicted_database(csv_path: str, db_path: str) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.executescript("DROP TABLE IF EXISTS predicted_interactions;" + _PREDICTED_SCHEMA)
+        conn.commit()
+
+        if not Path(csv_path).exists():
+            print(f"[warn] Predicted-interactions CSV not found at '{csv_path}' — AI predictions disabled.", file=sys.stderr)
+            return
+
+        cur = conn.cursor()
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            batch = []
+            skipped = 0
+            for row in reader:
+                try:
+                    num_a = _id_to_num((row.get("drug_a_id") or "").strip())
+                    num_b = _id_to_num((row.get("drug_b_id") or "").strip())
+                    confidence = float(row.get("confidence") or "")
+                except (ValueError, IndexError):
+                    skipped += 1
+                    continue
+                batch.append((
+                    num_a, num_b, confidence,
+                    (row.get("method") or "").strip(),
+                    (row.get("generated_at") or "").strip(),
+                ))
+            if batch:
+                cur.executemany(_PREDICTED_INSERT_SQL, batch)
+
+        conn.commit()
+        count = conn.execute("SELECT COUNT(*) FROM predicted_interactions").fetchone()[0]
+        print(f"[info] Loaded {count:,} AI-predicted interactions ({skipped:,} rows skipped).")
+    finally:
+        conn.close()
+
+
+def get_predicted_interaction(conn: sqlite3.Connection, id_a: str, id_b: str) -> dict | None:
+    num_a, num_b = _id_to_num(id_a), _id_to_num(id_b)
+    row = conn.execute(
+        """
+        SELECT confidence, method, generated_at
+        FROM predicted_interactions
+        WHERE (drug_a_num = ? AND drug_b_num = ?)
+           OR (drug_a_num = ? AND drug_b_num = ?)
+        ORDER BY confidence DESC
+        LIMIT 1
+        """,
+        (num_a, num_b, num_b, num_a),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def drug_se_burden(conn: sqlite3.Connection, drug_id: str) -> float | None:
     """
-    Returns the average freq_upper across all side effects for this drug (0–1 scale).
-    Entries without a known frequency are excluded.  Returns None if no data exists.
+    Returns a severity-weighted side-effect burden for this drug.
+    Each SE contributes freq_upper × (severity/3); average is on 0–1 scale.
+    Falls back to plain freq_upper average when severity is unscored.
+    Returns None if no frequency data exists.
     """
     drug_num = _id_to_num(drug_id)
     row = conn.execute(
         """
-        SELECT AVG(freq_upper) AS burden
+        SELECT
+            AVG(
+                CASE WHEN severity IS NOT NULL
+                     THEN freq_upper * (severity / 5.0)
+                     ELSE freq_upper
+                END
+            ) AS burden
         FROM side_effects
         WHERE ddinter_num = ? AND freq_upper IS NOT NULL
         """,
@@ -607,7 +705,7 @@ def get_side_effects(
     drug_num = _id_to_num(drug_id)
     rows = conn.execute(
         """
-        SELECT se_name, freq_lower, freq_upper, freq_label
+        SELECT se_name, freq_lower, freq_upper, freq_label, severity
         FROM side_effects
         WHERE ddinter_num = ?
           AND (freq_upper IS NULL OR freq_upper > 0)
@@ -642,6 +740,7 @@ async def lifespan(app: FastAPI):
     build_matching_scores(DB_PATH)
     build_food_database(FOOD_CSV_PATH, DB_PATH)
     build_disease_database(DISEASE_CSV_PATH, DB_PATH)
+    build_predicted_database(PREDICTED_CSV_PATH, DB_PATH)
     yield
 
 
@@ -678,6 +777,9 @@ class PairScore(BaseModel):
     drug_b_name: str
     score:       float | None
     mechanism:   str | None
+    is_predicted:         bool         = False
+    predicted_confidence: float | None = None
+    advisory:             str | None   = None
 
 
 class ReplacementCandidate(BaseModel):
@@ -726,6 +828,7 @@ class SideEffect(BaseModel):
     freq_lower: float | None
     freq_upper: float | None
     freq_label: str | None
+    severity:   int | None
 
 
 class DrugSideEffects(BaseModel):
@@ -850,6 +953,20 @@ def regime_risk(req: RegimeRequest):
                 (na, nb, nb, na),
             ).fetchone()
             mechanism = mech_row["mechanism"] if mech_row else None
+
+            # AI-predicted interactions are purely additive: only surfaced
+            # when there's no verified interaction row for this pair, and
+            # never allowed to affect strength/risk/coverage calculations.
+            is_predicted = False
+            predicted_confidence = None
+            advisory = None
+            if mech_row is None:
+                predicted = get_predicted_interaction(conn, id_a, id_b)
+                if predicted:
+                    is_predicted = True
+                    predicted_confidence = round(predicted["confidence"], 4)
+                    advisory = _predicted_advisory(predicted["method"])
+
             pair_scores.append(PairScore(
                 drug_a_id=id_a,
                 drug_a_name=names[id_a],
@@ -857,6 +974,9 @@ def regime_risk(req: RegimeRequest):
                 drug_b_name=names[id_b],
                 score=score,
                 mechanism=mechanism,
+                is_predicted=is_predicted,
+                predicted_confidence=predicted_confidence,
+                advisory=advisory,
             ))
 
         similar_replacements: list[DrugReplacements] = []

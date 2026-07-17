@@ -31,3 +31,7 @@ exclude/
 
 # no need to commit the interactions for now
 *.csv
+
+# DDI prediction pipeline artifacts (embeddings, trained model weights)
+backend/ddi_predict/*.npz
+backend/ddi_predict/*.pt

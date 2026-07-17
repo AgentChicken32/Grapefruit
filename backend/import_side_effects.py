@@ -15,7 +15,7 @@ import os
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "interactions.db")
 MAPPING_CSV = os.path.join(os.path.dirname(__file__), "cid_to_ddinter.csv")
-SE_DB_DIR = os.path.join(os.path.dirname(__file__), "..", "Drug_SE_DB")
+SE_DB_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "Drug_SE_DB")
 MEDDRA_FREQ_TSV = os.path.join(SE_DB_DIR, "meddra_freq.tsv", "meddra_freq.tsv")
 
 

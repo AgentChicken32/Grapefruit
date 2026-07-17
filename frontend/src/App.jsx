@@ -189,6 +189,17 @@ const css = `
     color: var(--blue); border-radius: 4px; padding: 2px 7px; white-space: nowrap;
   }
 
+  .ai-badge {
+    display: inline-block; font-family: var(--mono); font-size: 0.65rem;
+    background: #2a1a08; border: 1px solid #7a4512;
+    color: var(--warn); border-radius: 4px; padding: 2px 7px; white-space: nowrap;
+    cursor: help;
+  }
+  .predicted-legend {
+    display: block; color: var(--warn); font-size: 0.68rem; font-family: var(--mono);
+    margin: 2px 0 8px;
+  }
+
   /* ---- Drug row with popup buttons ---- */
   .drug-row-buttons {
     display: flex; gap: 6px; align-items: center;
@@ -338,6 +349,19 @@ function severityColor(sev) {
   return "#facc15";
 }
 
+// SE severity uses 1–5 scale: trivial / mild / moderate / severe / life-threatening
+function seSeverityColor(sev) {
+  if (sev === 5) return "#f87171";
+  if (sev === 4) return "#fb923c";
+  if (sev === 3) return "#facc15";
+  if (sev === 2) return "#86efac";
+  return "#4ade80";
+}
+
+function seSeverityLabel(sev) {
+  return ["", "Trivial", "Mild", "Moderate", "Severe", "Life-threatening"][sev] ?? null;
+}
+
 function useDebounce(value, delay) {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -405,6 +429,11 @@ function InteractionModal({ drug, type, foodData, diseaseData, seData, onClose }
                     return (
                       <div key={i} className="modal-se-item">
                         <span className="modal-se-name">{se.se_name}</span>
+                        {se.severity != null && (
+                          <span className="severity-badge" style={{ color: seSeverityColor(se.severity) }}>
+                            {seSeverityLabel(se.severity)} ({se.severity}/5)
+                          </span>
+                        )}
                         <div className="modal-se-bar">
                           <div className="modal-se-bar-fill" style={{ width: `${pct}%` }} />
                         </div>
@@ -708,6 +737,11 @@ export default function App() {
             {result.pair_scores?.length > 0 && (
               <>
                 <p className="section-title">Pairwise Matching Scores</p>
+                {result.pair_scores.some(ps => ps.is_predicted) && (
+                  <span className="predicted-legend">
+                    ⚠ Rows marked AI-predicted are model-generated and have not been clinically verified.
+                  </span>
+                )}
                 <table className="data-table">
                   <thead>
                     <tr><th>Drug Pair</th><th>Mechanism</th><th className="right">Matching Score</th></tr>
@@ -726,7 +760,9 @@ export default function App() {
                             </div>
                           </td>
                           <td>
-                            {ps.mechanism
+                            {ps.is_predicted
+                              ? <span className="ai-badge" title={ps.advisory}>AI-predicted · {(ps.predicted_confidence * 100).toFixed(0)}%</span>
+                              : ps.mechanism
                               ? <span className="mech-badge">{ps.mechanism}</span>
                               : <span className="no-data">—</span>}
                           </td>
