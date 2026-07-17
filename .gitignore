@@ -9,6 +9,10 @@ __pycache__/
 # Database (rebuilt from CSV on each run)
 *.db
 
+# Medra files
+*Meddra
+*meddra
+
 # Frontend
 node_modules/
 dist/
