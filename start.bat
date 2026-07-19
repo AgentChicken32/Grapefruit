@@ -17,7 +17,7 @@ set "BACKEND=%ROOT%backend"
 set "FRONTEND=%ROOT%frontend"
 set "VENV=%BACKEND%\venv"
 set "VENV_PIP=%VENV%\Scripts\pip.exe"
-set "REQUIREMENTS=%ROOT%requirements.txt"
+set "REQUIREMENTS=%BACKEND%\requirements.txt"
 
 echo.
 echo ============================================================

@@ -1,6 +1,13 @@
 Drug data:
     Source:  DDInter 2.0 (ddinter2.scbdd.com)
     License: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+    
+    Source:  SIDER (sideeffects.embl.de)
+    License: Creative Commons Attribution-ShareAlike 4.0
+
+DDI predictions:
+    Source:  DDI-LLM (github.com/sshaghayeghs/DDI-LLM)
+    License: None - this might be a problem!!!
 
 Code libraries:
     Source:  Node.js (nodejs.org)

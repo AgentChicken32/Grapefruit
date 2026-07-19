@@ -9,7 +9,10 @@ __pycache__/
 # Database (rebuilt from CSV on each run)
 *.db
 
-# Medra files
+# Side effect stuff
+Drug_SE_DB/
+
+# Meddra files
 *Meddra
 *meddra
 
@@ -23,18 +26,22 @@ dist/
 # VSCode
 .vscode/
 
-# Things we purposely want to exclude (usually test stuff)
+# Things we purposely want to exclude (usually test and dev stuff)
 exclude/
+.claude/
+methods.txt
 
 # Other unnecessary stuff
 *.json
+!vercel.json
 *.svg
 *.png
 *.css
 *.docx
 
-# no need to commit the interactions for now
+# no need to commit large files
 *.csv
+*.tsv
 
 # DDI prediction pipeline artifacts (embeddings, trained model weights)
 backend/ddi_predict/*.npz

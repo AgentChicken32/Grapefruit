@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000/api";
 
 const css = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Syne:wght@400;500;600;700;800&display=swap');
@@ -24,14 +24,65 @@ const css = `
     --sans:     'Syne', sans-serif;
   }
 
-  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; }
+  body.light {
+    --bg:       #f4f6f9;
+    --surface:  #ffffff;
+    --border:   #d1d5db;
+    --accent:   #16a34a;
+    --blue:     #2563eb;
+    --warn:     #ea580c;
+    --danger:   #dc2626;
+    --purple:   #9333ea;
+    --muted:    #6b7280;
+    --text:     #111827;
+    --subtext:  #4b5563;
+  }
+  body.light .header h1 { color: #111827; }
+  body.light .dropdown { background: #ffffff; }
+  body.light .data-table tr:hover td { background: #f9fafb; }
+  body.light .repl-table tr:hover td { background: #f9fafb; }
+  body.light .replacement-group-header { background: #f3f4f6; }
+  body.light .repl-table th { background: #f3f4f6; }
+  body.light .score-card.primary { background: #f0fdf4; }
+
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; transition: background 0.2s, color 0.2s; }
 
   .app { max-width: 860px; margin: 0 auto; padding: 48px 24px 80px; }
 
-  .header { margin-bottom: 48px; }
+  .header { margin-bottom: 48px; position: relative; }
   .header h1 { font-size: 2rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; color: #fff; }
   .header h1 span { color: var(--accent); }
   .header p { margin-top: 8px; color: var(--subtext); font-size: 0.875rem; font-family: var(--mono); }
+
+  .theme-toggle {
+    position: absolute; top: 0; right: 0;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 99px;
+    padding: 6px 14px; cursor: pointer; font-family: var(--mono); font-size: 0.72rem;
+    color: var(--muted); display: inline-flex; align-items: center; gap: 7px;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .theme-toggle:hover { border-color: var(--muted); color: var(--text); }
+  .theme-toggle .toggle-track {
+    width: 28px; height: 16px; border-radius: 8px; background: var(--border);
+    position: relative; transition: background 0.2s; flex-shrink: 0;
+  }
+  .theme-toggle.light-on .toggle-track { background: var(--accent); }
+  .theme-toggle .toggle-thumb {
+    position: absolute; top: 2px; left: 2px;
+    width: 12px; height: 12px; border-radius: 50%; background: var(--muted);
+    transition: transform 0.2s, background 0.2s;
+  }
+  .theme-toggle.light-on .toggle-thumb { transform: translateX(12px); background: #fff; }
+
+  .se-weight-row {
+    display: flex; align-items: center; gap: 12px; margin-top: 14px;
+    font-family: var(--mono); font-size: 0.72rem; color: var(--muted);
+  }
+  .se-weight-row label { white-space: nowrap; }
+  .se-weight-row input[type=range] {
+    flex: 1; max-width: 180px; accent-color: var(--accent); cursor: pointer;
+  }
+  .se-weight-val { min-width: 32px; color: var(--text); font-weight: 500; }
   .header-status {
     display: inline-flex; align-items: center; gap: 6px;
     font-family: var(--mono); font-size: 0.7rem; color: var(--muted);
@@ -117,6 +168,32 @@ const css = `
     color: var(--muted); margin: 28px 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
   }
 
+  .legend-toggle {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 0.68rem; color: var(--muted);
+    background: none; border: 1px solid var(--border); border-radius: 99px;
+    padding: 3px 10px; cursor: pointer; transition: border-color 0.15s, color 0.15s;
+    margin-bottom: 10px;
+  }
+  .legend-toggle:hover { border-color: var(--muted); color: var(--text); }
+  .legend-toggle .legend-caret { font-size: 0.55rem; transition: transform 0.2s; transform: rotate(-90deg); }
+  .legend-toggle .legend-caret.open { transform: rotate(0deg); }
+
+  .legend-box {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    margin-bottom: 16px; overflow: hidden; animation: fadeUp 0.15s ease;
+  }
+  .legend-row {
+    display: flex; align-items: flex-start; gap: 14px;
+    padding: 9px 16px; border-bottom: 1px solid var(--border);
+  }
+  .legend-row:last-child { border-bottom: none; }
+  .legend-score {
+    font-family: var(--mono); font-size: 0.88rem; font-weight: 600;
+    min-width: 20px; flex-shrink: 0; line-height: 1.45;
+  }
+  .legend-label { font-size: 0.8rem; color: var(--subtext); line-height: 1.45; }
+
   .data-table { width: 100%; border-collapse: collapse; }
   .data-table th {
     font-family: var(--mono); font-size: 0.65rem; text-transform: uppercase;
@@ -146,13 +223,15 @@ const css = `
   .replacements-grid { display: flex; flex-direction: column; gap: 20px; }
 
   .replacement-group {
-    background: var(--surface); border: 1px solid var(--border);
+    background: var(--surface); border: 1px solid var(--accent);
     border-radius: var(--radius); overflow: hidden;
   }
   .replacement-group-header {
     display: flex; align-items: center; gap: 10px;
     padding: 12px 16px; background: #0f1218; border-bottom: 1px solid var(--border);
+    cursor: pointer; user-select: none;
   }
+  .replacement-group-header:hover { background: #141720; }
   .replacement-group-header .drug-label { font-weight: 700; font-size: 0.9rem; color: var(--text); }
   .replacement-group-header .drug-id-badge {
     font-family: var(--mono); font-size: 0.68rem; color: var(--muted);
@@ -163,6 +242,11 @@ const css = `
     color: var(--blue); background: #0d1a2e; border: 1px solid #1e3a5f;
     border-radius: 99px; padding: 2px 8px;
   }
+  .replacement-group-header .collapse-caret {
+    font-size: 0.6rem; color: var(--muted); transition: transform 0.2s; flex-shrink: 0;
+  }
+  .replacement-group-header .collapse-caret.collapsed { transform: rotate(-90deg); }
+  .replacement-group-body { overflow: hidden; }
   .no-replacements {
     padding: 14px 16px; font-family: var(--mono); font-size: 0.75rem;
     color: var(--muted); font-style: italic;
@@ -300,6 +384,16 @@ const css = `
   .modal-disease-text { font-size: 0.8rem; color: var(--subtext); line-height: 1.55; }
 
   /* Side effect items inside modal */
+  .modal-se-header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 7px 20px; border-bottom: 1px solid var(--border);
+    background: var(--surface); position: sticky; top: 0; z-index: 1;
+    font-family: var(--mono); font-size: 0.62rem; text-transform: uppercase;
+    letter-spacing: 0.09em; color: var(--muted);
+  }
+  .modal-se-header-name { flex: 1; }
+  .modal-se-header-bar { width: 80px; flex-shrink: 0; }
+  .modal-se-header-freq { min-width: 70px; text-align: right; }
   .modal-se-item {
     display: flex; align-items: center; gap: 12px;
     padding: 10px 20px; border-bottom: 1px solid var(--border);
@@ -415,7 +509,6 @@ function InteractionModal({ drug, type, foodData, diseaseData, seData, onClose }
             seItems.length === 0
               ? <p className="modal-empty">No side effect frequency data for this drug.</p>
               : (() => {
-                  // Canonical bar widths for qualitative labels (purely visual, not numeric)
                   const LABEL_BAR = {
                     'very common': 1.0, 'common': 0.6, 'frequent': 0.55,
                     'uncommon': 0.3, 'infrequent': 0.25,
@@ -441,6 +534,25 @@ function InteractionModal({ drug, type, foodData, diseaseData, seData, onClose }
                       </div>
                     );
                   });
+                  return [
+                    <div key="__hdr" className="modal-se-header">
+                      <span className="modal-se-header-name">Side Effect</span>
+                      <span className="modal-se-header-bar">Occurrence</span>
+                      <span className="modal-se-header-freq">Frequency</span>
+                    </div>,
+                    ...seItems.map((se, i) => {
+                      const pct = displayFreq(se) * 100;
+                      return (
+                        <div key={i} className="modal-se-item">
+                          <span className="modal-se-name">{se.se_name}</span>
+                          <div className="modal-se-bar">
+                            <div className="modal-se-bar-fill" style={{ width: `${pct}%` }} />
+                          </div>
+                          <span className="modal-se-freq">{freqLabel(se)}</span>
+                        </div>
+                      );
+                    }),
+                  ];
                 })()
           )}
           {isFood && (
@@ -496,9 +608,19 @@ export default function App() {
   // Modal state: { drug: {id, name}, type: 'food'|'disease' } or null
   const [modal, setModal] = useState(null);
 
-  const inputRef     = useRef(null);
-  const inputAreaRef = useRef(null);
-  const debouncedQ   = useDebounce(query, 200);
+  // Change false → true here to default to light mode
+  const [darkMode, setDarkMode]     = useState(true);
+  // Risk method weight: 0 = entropy only, 1 = compounding only (default 0.5)
+  const [seWeight, setSeWeight]     = useState(0.5);
+  // Set of drug IDs whose replacement lists are collapsed
+  const [collapsedGroups, setCollapsedGroups] = useState(new Set());
+  const [showRiskLegend, setShowRiskLegend]         = useState(false);
+  const [showSeverityLegend, setShowSeverityLegend] = useState(false);
+
+  const inputRef      = useRef(null);
+  const inputAreaRef  = useRef(null);
+  const suppressRef   = useRef(false);  // prevent stale fetches re-opening dropdown after add
+  const debouncedQ    = useDebounce(query, 200);
 
   useEffect(() => {
     let cancelled = false;
@@ -513,15 +635,27 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    document.body.classList.toggle("light", !darkMode);
+  }, [darkMode]);
+
+  useEffect(() => {
     if (debouncedQ.length < 2) { setSuggs([]); return; }
+    let cancelled = false;
     fetch(`${API_BASE}/search?q=${encodeURIComponent(debouncedQ)}&limit=8`)
       .then(r => r.json())
-      .then(data => { setSuggs(data.filter(s => !drugs.some(d => d.id === s.id))); setActiveIdx(-1); })
-      .catch(() => setSuggs([]));
-  }, [debouncedQ, drugs]);
+      .then(data => {
+        if (!cancelled && !suppressRef.current)
+          setSuggs(data.filter(s => !drugs.some(d => d.id === s.id)));
+        setActiveIdx(-1);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [debouncedQ]); // intentionally omit `drugs` — filter applied on render below
 
   const addDrug = useCallback((drug) => {
     if (drugs.some(d => d.id === drug.id)) return;
+    suppressRef.current = true;
+    setTimeout(() => { suppressRef.current = false; }, 400);
     setDrugs(prev => [...prev, drug]);
     setQuery(""); setSuggs([]); setResult(null);
     inputRef.current?.focus();
@@ -547,7 +681,7 @@ export default function App() {
       const res = await fetch(`${API_BASE}/regime/risk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ drug_ids: drugs.map(d => d.id) }),
+        body: JSON.stringify({ drug_ids: drugs.map(d => d.id), risk_method_weight: seWeight }),
       });
       if (!res.ok) throw new Error(`Server error ${res.status}`);
       setResult(await res.json());
@@ -567,14 +701,15 @@ export default function App() {
 
   const clear = () => { setDrugs([]); setResult(null); setError(null); setQuery(""); setModal(null); };
 
-  const maxRisk = result ? Math.max(...result.drugs.map(d => d.risk), 0.001) : 1;
+  const maxRisk = 3; // drug risk scores are on a 0-3 scale
+  const similarityCutoff = result?.similarity_cutoff ?? 0.9;
 
   // Build lookup maps from result for modal
   const foodMap    = result ? Object.fromEntries(result.food_interactions?.map(g => [g.drug_id, g]) ?? []) : {};
   const diseaseMap = result ? Object.fromEntries(result.disease_interactions?.map(g => [g.drug_id, g]) ?? []) : {};
   const seMap      = result ? Object.fromEntries(result.side_effects?.map(g => [g.drug_id, g]) ?? []) : {};
 
-  const openModal = (drug, type) => setModal({ drug, type });
+  const openModal = (drug, type, candidateData = null) => setModal({ drug, type, candidateData });
   const closeModal = () => setModal(null);
 
   return (
@@ -582,8 +717,27 @@ export default function App() {
       <style>{css}</style>
       <div className="app">
         <div className="header">
+          <button
+            className={`theme-toggle${darkMode ? "" : " light-on"}`}
+            onClick={() => setDarkMode(v => !v)}
+            aria-label="Toggle light/dark mode"
+          >
+            {darkMode ? "☾" : "☀"}
+            <span className="toggle-track"><span className="toggle-thumb" /></span>
+            {darkMode ? "Dark" : "Light"}
+          </button>
           <h1>Drug Regime<br /><span>Risk Scorer</span></h1>
           <p>Add drugs to a regime and assess interaction risk</p>
+          <div className="se-weight-row">
+            <label>Method 1 weight</label>
+            <input
+              type="range" min={0} max={1} step={0.05}
+              value={seWeight}
+              onChange={e => setSeWeight(parseFloat(e.target.value))}
+            />
+            <span className="se-weight-val">{Math.round(seWeight * 100)}%</span>
+            <span style={{color:"var(--muted)",fontSize:"0.65rem"}}>(0 = entropy · 1 = compounding)</span>
+          </div>
           <div className="header-status">
             <span className={`dot${online ? " online" : ""}`} />
             {online === null ? "connecting…"
@@ -611,7 +765,7 @@ export default function App() {
           {suggestions.length > 0 && (
             <div className="dropdown">
               {suggestions.map((s, i) => (
-                <div key={s.id} className={`dropdown-item${i === activeIdx ? " active" : ""}`} onMouseDown={() => addDrug(s)}>
+                <div key={s.id} className={`dropdown-item${i === activeIdx ? " active" : ""}`} onMouseDown={e => { e.preventDefault(); addDrug(s); }}>
                   <span className="drug-name">{s.name}</span>
                   <span className="drug-id">{s.id}</span>
                 </div>
@@ -642,31 +796,71 @@ export default function App() {
               <div className="score-card primary">
                 <label>Regime Risk</label>
                 <div className="value" style={{ color: riskColor(result.normalized_risk, 3) }}>
-                  {result.normalized_risk.toFixed(3)}
+                  {result.normalized_risk.toFixed(2)}
                 </div>
-                <div className="sub">
-                  {result.drugs.length} drugs · SE weight {((result.se_weight ?? 0) * 100).toFixed(0)}%
-                </div>
+                <div className="sub">based on {result.drugs.length} recognized drug{result.drugs.length !== 1 ? "s" : ""}</div>
               </div>
               <div className="score-card">
                 <label>DB Coverage</label>
                 <div className={`value${result.coverage_pct < 30 ? " warn" : ""}`} style={result.coverage_pct >= 30 ? { color: "var(--text)" } : {}}>{result.coverage_pct}%</div>
-                <div className="sub">{result.populated_edges} / {result.possible_edges} pairs</div>
+                <div className="sub">{result.populated_edges} / {result.possible_edges} possible pairs</div>
               </div>
               <div className="score-card">
-                <label>Drugs Scored</label>
-                <div className="value" style={{ color: "var(--text)" }}>{result.drugs.length}</div>
-                <div className="sub">{result.unknown_drugs.length} unrecognised</div>
+                <label>Method 1 Weight</label>
+                <div className="value" style={{ color: "var(--text)" }}>{((result.risk_method_weight ?? 0) * 100).toFixed(0)}%</div>
+                <div className="sub">compounding ↔ entropy</div>
               </div>
             </div>
 
+            {/* Regime risk legend */}
+            <button className="legend-toggle" onClick={() => setShowRiskLegend(v => !v)}>
+              <span className={`legend-caret${showRiskLegend ? " open" : ""}`}>▼</span>
+              Risk score guide (0 – 3)
+            </button>
+            {showRiskLegend && (
+              <div className="legend-box">
+                {[
+                  { range: "0 – 1", color: "#facc15", label: "Low — interactions are minor or well-managed; routine monitoring is sufficient." },
+                  { range: "1 – 2", color: "#fb923c", label: "Moderate — clinically significant interactions present; dose adjustment or closer monitoring may be needed." },
+                  { range: "2 – 3", color: "#f87171", label: "High — serious interactions likely; consider alternative drugs or intensive monitoring." },
+                ].map(({ range, color, label }) => (
+                  <div key={range} className="legend-row">
+                    <span className="legend-score" style={{ color }}>{range}</span>
+                    <span className="legend-label">{label}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Individual drug risk with food/disease buttons */}
             <p className="section-title">Individual Drug Risk</p>
+
+            {/* Severity legend */}
+            <button className="legend-toggle" onClick={() => setShowSeverityLegend(v => !v)}>
+              <span className={`legend-caret${showSeverityLegend ? " open" : ""}`}>▼</span>
+              Food &amp; disease severity guide (1 – 5)
+            </button>
+            {showSeverityLegend && (
+              <div className="legend-box">
+                {[
+                  { score: "1", color: "#facc15", label: "Minor — unlikely to require intervention." },
+                  { score: "2", color: "#f59e0b", label: "Moderate — may require dose adjustment or monitoring." },
+                  { score: "3", color: "#fb923c", label: "Severe — significant risk; some patients may require hospitalization." },
+                  { score: "4", color: "#ef4444", label: "High risk — likely hospitalization; possible fatal outcome." },
+                  { score: "5", color: "#f87171", label: "Critical — near-certain hospitalization and high risk of death." },
+                ].map(({ score, color, label }) => (
+                  <div key={score} className="legend-row">
+                    <span className="legend-score" style={{ color }}>{score}</span>
+                    <span className="legend-label">{label}</span>
+                  </div>
+                ))}
+              </div>
+            )}
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>Drug</th>
-                  <th>ID</th>
+                  <th>Drug Name</th>
+                  <th>Drug ID</th>
                   <th>Interactions</th>
                   <th className="right">Blended Risk</th>
                 </tr>
@@ -720,10 +914,10 @@ export default function App() {
                             <div className="bar">
                               <div className="bar-fill" style={{ width: `${(d.risk / maxRisk) * 100}%`, background: riskColor(d.risk, maxRisk) }} />
                             </div>
-                            {d.avg_strength !== null ? d.risk.toFixed(3) : <span className="no-data">no data</span>}
+                            {d.avg_strength !== null ? d.risk.toFixed(2) : <span className="no-data">no data</span>}
                           </div>
                           {d.se_burden != null && (
-                            <span className="risk-sub">SE burden {(d.se_burden * 100).toFixed(0)}%</span>
+                            <span className="risk-sub">{(d.se_burden * 100).toFixed(0)}% avg SE burden</span>
                           )}
                         </div>
                       </td>
@@ -785,67 +979,102 @@ export default function App() {
             )}
 
             {/* Similar replacement suggestions */}
-            {result.similar_replacements?.length > 0 && (
+            {result.similar_replacements?.some(group => group.replacements.length > 0) && (
               <>
-                <p className="section-title">Similar Drug Replacements <span style={{color:"var(--blue)",marginLeft:6,fontSize:"0.65rem",fontFamily:"var(--mono)"}}>matching score &gt; 90%</span></p>
+                <p className="section-title">Similar Drug Replacements <span style={{color:"var(--blue)",marginLeft:6,fontSize:"0.65rem",fontFamily:"var(--mono)"}}>(match score &gt; {(similarityCutoff * 100).toFixed(0)}%)</span></p>
                 <div className="replacements-grid">
-                  {result.similar_replacements.map(group => (
+                  {result.similar_replacements.filter(group => group.replacements.length > 0).map(group => {
+                    const isCollapsed = collapsedGroups.has(group.drug_id);
+                    const toggleGroup = () => setCollapsedGroups(prev => {
+                      const next = new Set(prev);
+                      next.has(group.drug_id) ? next.delete(group.drug_id) : next.add(group.drug_id);
+                      return next;
+                    });
+                    return (
                     <div key={group.drug_id} className="replacement-group">
-                      <div className="replacement-group-header">
+                      <div className="replacement-group-header" onClick={toggleGroup}>
+                        <span className={`collapse-caret${isCollapsed ? " collapsed" : ""}`}>▼</span>
                         <span className="drug-label">{group.drug_name}</span>
                         <span className="drug-id-badge">{group.drug_id}</span>
-                        {group.replacements.length > 0
-                          ? <span className="count-badge">{group.replacements.length} similar drug{group.replacements.length !== 1 ? "s" : ""}</span>
-                          : <span className="count-badge" style={{color:"var(--muted)",borderColor:"var(--border)",background:"transparent"}}>none found</span>
-                        }
+                        <span className="count-badge">{group.replacements.length} similar drug{group.replacements.length !== 1 ? "s" : ""}</span>
                       </div>
-                      {group.replacements.length === 0 ? (
-                        <p className="no-replacements">No drugs outside the regime exceed the 90% similarity threshold.</p>
-                      ) : (
-                        <table className="repl-table">
-                          <thead>
-                            <tr>
-                              <th>Replacement Drug</th>
-                              <th>ID</th>
-                              <th className="right">Interactions (original: {group.original_interaction_count.toLocaleString()})</th>
-                              <th className="right">Match Score</th>
-                              <th className="right">Regime Risk if Substituted</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {group.replacements.map(r => {
-                              const delta = r.substitute_risk != null ? r.substitute_risk - result.normalized_risk : null;
-                              const deltaColor = delta == null ? "var(--muted)" : delta < -0.0001 ? "#facc15" : delta > 0.0001 ? "#f87171" : "var(--muted)";
-                              const deltaLabel = delta == null ? "—" : delta > 0.0001 ? `+${delta.toFixed(4)}` : delta < -0.0001 ? delta.toFixed(4) : "±0";
-                              return (
-                                <tr key={r.id}>
-                                  <td className="repl-name">{r.name}</td>
-                                  <td className="repl-id">{r.id}</td>
-                                  <td className="repl-count">{r.interaction_count.toLocaleString()}</td>
-                                  <td className="repl-score-cell">
-                                    <div className="bar-wrap">
-                                      <div className="bar" style={{width:50}}>
-                                        <div className="bar-fill" style={{ width: `${r.score * 100}%`, background: scoreColor(r.score) }} />
-                                      </div>
-                                      <span className="bar-label" style={{ color: scoreColor(r.score) }}>{(r.score * 100).toFixed(1)}%</span>
+                      {!isCollapsed && <table className="repl-table">
+                        <thead>
+                          <tr>
+                            <th>Replacement Drug</th>
+                            <th>ID</th>
+                            <th>Interactions</th>
+                            <th className="right">Match Score</th>
+                            <th className="right">Regime Risk if Substituted</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {group.replacements.map(r => {
+                            const delta = r.substitute_risk != null ? r.substitute_risk - result.normalized_risk : null;
+                            const deltaColor = delta == null ? "var(--muted)" : delta < -0.0001 ? "#facc15" : delta > 0.0001 ? "#f87171" : "var(--muted)";
+                            const deltaLabel = delta == null ? "—" : delta > 0.0001 ? `+${delta.toFixed(2)}` : delta < -0.0001 ? delta.toFixed(2) : "±0";
+                            return (
+                              <tr key={r.id}>
+                                <td className="repl-name">{r.name}</td>
+                                <td className="repl-id">{r.id}</td>
+                                <td>
+                                  <div className="drug-row-buttons">
+                                    {r.foods.length > 0 ? (
+                                      <button
+                                        className={`btn-pill food${modal?.drug.id === r.id && modal?.type === "food" ? " active" : ""}`}
+                                        onClick={() => openModal(r, "food", r)}
+                                      >
+                                        🍽 {r.foods.length} food
+                                      </button>
+                                    ) : (
+                                      <span className="btn-pill none-badge">🍽 none</span>
+                                    )}
+                                    {r.diseases.length > 0 ? (
+                                      <button
+                                        className={`btn-pill disease${modal?.drug.id === r.id && modal?.type === "disease" ? " active" : ""}`}
+                                        onClick={() => openModal(r, "disease", r)}
+                                      >
+                                        🩺 {r.diseases.length} disease
+                                      </button>
+                                    ) : (
+                                      <span className="btn-pill none-badge">🩺 none</span>
+                                    )}
+                                    {r.side_effects.length > 0 ? (
+                                      <button
+                                        className={`btn-pill side-effects${modal?.drug.id === r.id && modal?.type === "side-effects" ? " active" : ""}`}
+                                        onClick={() => openModal(r, "side-effects", r)}
+                                      >
+                                        💊 {r.side_effects.length} SE
+                                      </button>
+                                    ) : (
+                                      <span className="btn-pill none-badge">💊 no SE</span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="repl-score-cell">
+                                  <div className="bar-wrap">
+                                    <div className="bar" style={{width:50}}>
+                                      <div className="bar-fill" style={{ width: `${Math.max(0, Math.min(100, ((r.score - similarityCutoff) / (1 - similarityCutoff)) * 100))}%`, background: scoreColor(r.score) }} />
                                     </div>
-                                  </td>
-                                  <td className="repl-score-cell">
-                                    {r.substitute_risk != null ? (
-                                      <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:2}}>
-                                        <span style={{fontFamily:"var(--mono)",fontSize:"0.8rem",color:riskColor(r.substitute_risk, maxRisk)}}>{r.substitute_risk.toFixed(4)}</span>
-                                        <span style={{fontFamily:"var(--mono)",fontSize:"0.7rem",color:deltaColor}}>{deltaLabel} vs current</span>
-                                      </div>
-                                    ) : <span style={{color:"var(--muted)",fontSize:"0.75rem"}}>no data</span>}
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      )}
+                                    <span className="bar-label" style={{ color: scoreColor(r.score) }}>{(r.score * 100).toFixed(1)}%</span>
+                                  </div>
+                                </td>
+                                <td className="repl-score-cell">
+                                  {r.substitute_risk != null ? (
+                                    <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:2}}>
+                                      <span style={{fontFamily:"var(--mono)",fontSize:"0.8rem",color:riskColor(r.substitute_risk, maxRisk)}}>{r.substitute_risk.toFixed(2)}</span>
+                                      <span style={{fontFamily:"var(--mono)",fontSize:"0.7rem",color:deltaColor}}>{deltaLabel} vs current</span>
+                                    </div>
+                                  ) : <span style={{color:"var(--muted)",fontSize:"0.75rem"}}>no data</span>}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>}
                     </div>
-                  ))}
+                  );
+                  })}
                 </div>
               </>
             )}
@@ -865,9 +1094,9 @@ export default function App() {
         <InteractionModal
           drug={modal.drug}
           type={modal.type}
-          foodData={foodMap[modal.drug.id]}
-          diseaseData={diseaseMap[modal.drug.id]}
-          seData={seMap[modal.drug.id]}
+          foodData={modal.candidateData ? { foods: modal.candidateData.foods } : foodMap[modal.drug.id]}
+          diseaseData={modal.candidateData ? { diseases: modal.candidateData.diseases } : diseaseMap[modal.drug.id]}
+          seData={modal.candidateData ? { side_effects: modal.candidateData.side_effects } : seMap[modal.drug.id]}
           onClose={closeModal}
         />
       )}

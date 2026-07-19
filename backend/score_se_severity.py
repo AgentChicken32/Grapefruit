@@ -1,7 +1,7 @@
 """
-Scores each unique side effect name in the side_effects table with a severity
-rating of 1 (mild), 2 (moderate), or 3 (severe), matching the interaction
-strength scale already used for drug-drug interactions.
+Scores each unique side effect name in the side_effects table (Supabase
+Postgres) with a severity rating from 1 (trivial) to 5 (life-threatening),
+matching the interaction-strength scale used elsewhere.
 
 Uses Claude Opus 4.8 to batch-score 50 names per API call.
 Resumable: skips side effects that already have a severity score.
@@ -11,17 +11,24 @@ Usage:
 
 Requirements:
     - ANTHROPIC_API_KEY environment variable set
-    - anthropic package installed in the venv
+    - DATABASE_URL in backend/.env (see backend/.env.example)
+    - anthropic package installed (pip install anthropic) - not part of
+      backend/requirements.txt, since this is an occasional offline tool,
+      not something the deployed app needs.
 """
 
 import json
 import os
-import sqlite3
 import time
+from pathlib import Path
 
 import anthropic
+import psycopg
+from dotenv import load_dotenv
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "interactions.db")
+load_dotenv(Path(__file__).parent / ".env")
+
+DATABASE_URL = os.environ.get("DATABASE_URL")
 BATCH_SIZE = 50
 MODEL = "claude-opus-4-8"
 
@@ -55,16 +62,7 @@ Example response format:
 {"dry mouth": 1, "nausea": 2, "agranulocytosis": 4, "fatal hepatic failure": 5}"""
 
 
-def add_severity_column(conn: sqlite3.Connection):
-    """Add severity column if it doesn't exist."""
-    cols = [r[1] for r in conn.execute("PRAGMA table_info(side_effects)").fetchall()]
-    if "severity" not in cols:
-        conn.execute("ALTER TABLE side_effects ADD COLUMN severity INTEGER")
-        conn.commit()
-        print("Added 'severity' column to side_effects table.")
-
-
-def get_unscored_names(conn: sqlite3.Connection) -> list[str]:
+def get_unscored_names(conn: psycopg.Connection) -> list[str]:
     """Return distinct SE names that have no severity score yet."""
     rows = conn.execute(
         "SELECT DISTINCT se_name FROM side_effects WHERE severity IS NULL ORDER BY se_name"
@@ -88,7 +86,7 @@ def score_batch(client: anthropic.Anthropic, names: list[str]) -> dict[str, int]
     )
     text = response.content[0].text.strip()
     scores = json.loads(text)
-    # Validate that values are 1, 2, or 3
+    # Validate that values are 1-5
     result = {}
     for name in names:
         if name in scores and scores[name] in (1, 2, 3, 4, 5):
@@ -99,12 +97,13 @@ def score_batch(client: anthropic.Anthropic, names: list[str]) -> dict[str, int]
     return result
 
 
-def apply_scores(conn: sqlite3.Connection, scores: dict[str, int]):
+def apply_scores(conn: psycopg.Connection, scores: dict[str, int]) -> None:
     """Write severity scores to all matching rows."""
-    conn.executemany(
-        "UPDATE side_effects SET severity = ? WHERE se_name = ?",
-        [(v, k) for k, v in scores.items()],
-    )
+    with conn.cursor() as cur:
+        cur.executemany(
+            "UPDATE side_effects SET severity = %s WHERE se_name = %s",
+            [(v, k) for k, v in scores.items()],
+        )
     conn.commit()
 
 
@@ -115,13 +114,16 @@ def main():
             "ERROR: ANTHROPIC_API_KEY environment variable is not set.\n"
             "Set it before running this script."
         )
+    if not DATABASE_URL:
+        raise SystemExit(
+            "ERROR: DATABASE_URL is not set. Copy backend/.env.example to backend/.env "
+            "and fill in your Supabase connection string."
+        )
 
     client = anthropic.Anthropic(api_key=api_key)
-    conn = sqlite3.connect(DB_PATH)
+    conn = psycopg.connect(DATABASE_URL)
 
     try:
-        add_severity_column(conn)
-
         names = get_unscored_names(conn)
         total = len(names)
         if total == 0:

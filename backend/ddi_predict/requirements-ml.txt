@@ -1,4 +1,3 @@
-\
 # Offline dataset-augmentation pipeline dependencies.
 # NOT part of the deployed backend (see ../requirements.txt) — install
 # separately only when you need to (re)run the prediction pipeline.
