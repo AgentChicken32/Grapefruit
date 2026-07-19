@@ -71,6 +71,8 @@ def bulk_interaction_edges(
 
     Returns (edges, mechanisms):
       - edges[a][b] is symmetric: edges[a][b] and edges[b][a] both exist.
+        A pair only appears here if it has at least one verified interaction
+        row - used elsewhere to distinguish "verified" from "AI-predicted".
       - mechanisms[(a, b)] picks one arbitrary mechanism per pair (matches
         the old single-row `LIMIT 1` lookup's "any one" semantics).
     """
@@ -114,7 +116,13 @@ def _neighbor_strengths(
 
 
 def regime_se_burdens(conn: psycopg.Connection, drug_ids: list[str] | set[str]) -> dict[str, list[float]]:
-    """One query for the whole set: each drug's known side-effect frequencies (0-1 scale)."""
+    """
+    One query for the whole set: each drug's severity-weighted side-effect
+    burdens. Each value is freq_upper * (severity / 5) when that side effect
+    has a severity score (see score_se_severity.py), else plain freq_upper -
+    same per-item shape compounding_risk/entropy_risk already expect, just
+    weighted before it gets there.
+    """
     ids = list(drug_ids)
     result: dict[str, list[float]] = {did: [] for did in ids}
     num_to_id = {_id_to_num(did): did for did in ids}
@@ -124,7 +132,7 @@ def regime_se_burdens(conn: psycopg.Connection, drug_ids: list[str] | set[str]) 
     placeholders = ",".join(["%s"] * len(nums))
     rows = conn.execute(
         f"""
-        SELECT ddinter_num, freq_upper
+        SELECT ddinter_num, freq_upper, severity
         FROM side_effects
         WHERE ddinter_num IN ({placeholders}) AND freq_upper IS NOT NULL
         """,
@@ -132,8 +140,10 @@ def regime_se_burdens(conn: psycopg.Connection, drug_ids: list[str] | set[str]) 
     ).fetchall()
     for row in rows:
         did = num_to_id.get(row["ddinter_num"])
-        if did is not None:
-            result[did].append(row["freq_upper"])
+        if did is None:
+            continue
+        burden = row["freq_upper"] * (row["severity"] / 5.0) if row["severity"] is not None else row["freq_upper"]
+        result[did].append(burden)
     return result
 
 
@@ -239,7 +249,7 @@ def bulk_side_effects(conn: psycopg.Connection, drug_nums: list[int], limit: int
     placeholders = ",".join(["%s"] * len(drug_nums))
     rows = conn.execute(
         f"""
-        SELECT ddinter_num, se_name, freq_lower, freq_upper, freq_label
+        SELECT ddinter_num, se_name, freq_lower, freq_upper, freq_label, severity
         FROM side_effects
         WHERE ddinter_num IN ({placeholders})
           AND (freq_upper IS NULL OR freq_upper > 0)
@@ -269,7 +279,51 @@ def bulk_side_effects(conn: psycopg.Connection, drug_nums: list[int], limit: int
                 "freq_lower": row["freq_lower"],
                 "freq_upper": row["freq_upper"],
                 "freq_label": row["freq_label"],
+                "severity":   row["severity"],
             })
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Predicted (AI-generated) interactions
+#
+# These come from the offline pipeline in backend/ddi_predict/ — a GCN link
+# predictor trained on the verified DDInter graph, using SMILES-based drug
+# embeddings as node features (see ddi_predict/README.md). They are NOT
+# clinically verified and must never influence strength/risk/coverage
+# calculations, which stay derived solely from the `interactions` table.
+# Loaded into Postgres by migrate_to_supabase.py, same as everything else.
+# ---------------------------------------------------------------------------
+
+def _predicted_advisory(method: str) -> str:
+    return (
+        f"Predicted by an AI model ({method}, trained on the known DDInter "
+        "interaction graph using SMILES-based drug embeddings) — not a "
+        "clinically verified interaction."
+    )
+
+
+def bulk_predicted_interactions(
+    conn: psycopg.Connection, drug_nums: list[int],
+) -> dict[tuple[int, int], dict]:
+    """One query: best (highest-confidence) predicted interaction per unordered pair within drug_nums."""
+    result: dict[tuple[int, int], dict] = {}
+    if len(drug_nums) < 2:
+        return result
+    placeholders = ",".join(["%s"] * len(drug_nums))
+    rows = conn.execute(
+        f"""
+        SELECT drug_a_num, drug_b_num, confidence, method
+        FROM predicted_interactions
+        WHERE drug_a_num IN ({placeholders}) AND drug_b_num IN ({placeholders})
+        ORDER BY confidence DESC
+        """,
+        drug_nums + drug_nums,
+    ).fetchall()
+    for row in rows:
+        key = tuple(sorted((row["drug_a_num"], row["drug_b_num"])))
+        if key not in result:  # first row per pair wins - ORDER BY confidence DESC
+            result[key] = {"confidence": row["confidence"], "method": row["method"]}
     return result
 
 
@@ -527,6 +581,9 @@ class PairScore(BaseModel):
     drug_b_name: str
     score:       float | None
     mechanism:   str | None
+    is_predicted:         bool         = False
+    predicted_confidence: float | None = None
+    advisory:             str | None   = None
 
 
 class FoodInteraction(BaseModel):
@@ -560,6 +617,7 @@ class SideEffect(BaseModel):
     freq_lower: float | None
     freq_upper: float | None
     freq_label: str | None
+    severity:   int | None
 
 
 class DrugSideEffects(BaseModel):
@@ -664,14 +722,18 @@ def regime_risk(req: RegimeRequest):
                 unknown.append(q)
 
         resolved_ids = [d["id"] for d in resolved]
+        regime_nums = [_id_to_num(d["id"]) for d in resolved]
         eff_weight = req.risk_method_weight if req.risk_method_weight is not None else RISK_METHOD_WEIGHT
 
         # Batched: one query for every interaction edge (+ mechanism) among
-        # regime drugs, one for SE burdens, one for matching scores -- covers
-        # drug_risks, pair_scores, and coverage without a query per pair.
+        # regime drugs, one for SE burdens, one for matching scores, one for
+        # AI-predicted interactions, one for original interaction counts --
+        # covers drug_risks, pair_scores, and coverage without a query per pair.
         edges, mechanisms = bulk_interaction_edges(conn, resolved_ids)
         burdens           = regime_se_burdens(conn, resolved_ids)
         match_scores      = bulk_matching_scores(conn, resolved_ids)
+        predicted         = bulk_predicted_interactions(conn, regime_nums)
+        orig_counts       = bulk_candidate_info(conn, regime_nums)
 
         drug_risks: list[DrugRisk] = []
         for drug in resolved:
@@ -700,20 +762,36 @@ def regime_risk(req: RegimeRequest):
         populated  = sum(1 for a, b in pairs if b in edges.get(a, {}))
         coverage   = (populated / possible * 100) if possible > 0 else 0.0
 
-        pair_scores: list[PairScore] = [
-            PairScore(
+        pair_scores: list[PairScore] = []
+        for id_a, id_b in pairs:
+            has_interaction = id_b in edges.get(id_a, {})
+            mechanism = mechanisms.get((id_a, id_b))
+
+            # AI-predicted interactions are purely additive: only surfaced
+            # when there's no verified interaction row for this pair, and
+            # never allowed to affect strength/risk/coverage calculations.
+            is_predicted = False
+            predicted_confidence = None
+            advisory = None
+            if not has_interaction:
+                na, nb = _id_to_num(id_a), _id_to_num(id_b)
+                pred = predicted.get(tuple(sorted((na, nb))))
+                if pred:
+                    is_predicted = True
+                    predicted_confidence = round(pred["confidence"], 4)
+                    advisory = _predicted_advisory(pred["method"])
+
+            pair_scores.append(PairScore(
                 drug_a_id=id_a,
                 drug_a_name=names[id_a],
                 drug_b_id=id_b,
                 drug_b_name=names[id_b],
                 score=match_scores.get((id_a, id_b)),
-                mechanism=mechanisms.get((id_a, id_b)),
-            )
-            for id_a, id_b in pairs
-        ]
-
-        regime_nums = [_id_to_num(d["id"]) for d in resolved]
-        orig_counts = bulk_candidate_info(conn, regime_nums)
+                mechanism=mechanism,
+                is_predicted=is_predicted,
+                predicted_confidence=predicted_confidence,
+                advisory=advisory,
+            ))
 
         similar_replacements: list[DrugReplacements] = []
         for drug in resolved:

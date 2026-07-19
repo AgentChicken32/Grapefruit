@@ -12,6 +12,10 @@ __pycache__/
 # Side effect stuff
 Drug_SE_DB/
 
+# Meddra files
+*Meddra
+*meddra
+
 # Frontend
 node_modules/
 dist/
@@ -38,3 +42,7 @@ methods.txt
 # no need to commit large files
 *.csv
 *.tsv
+
+# DDI prediction pipeline artifacts (embeddings, trained model weights)
+backend/ddi_predict/*.npz
+backend/ddi_predict/*.pt

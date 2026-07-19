@@ -51,16 +51,35 @@ CREATE TABLE IF NOT EXISTS side_effects (
     se_name      TEXT    NOT NULL,
     freq_lower   DOUBLE PRECISION,
     freq_upper   DOUBLE PRECISION,
-    freq_label   TEXT
+    freq_label   TEXT,
+    severity     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_se_num  ON side_effects(ddinter_num);
 CREATE INDEX IF NOT EXISTS idx_se_name ON side_effects(ddinter_name);
+-- Upgrades a side_effects table that predates the severity column (CREATE
+-- TABLE IF NOT EXISTS above is a no-op against an existing table).
+ALTER TABLE side_effects ADD COLUMN IF NOT EXISTS severity INTEGER;
+
+-- AI-predicted interactions from backend/ddi_predict/ (see its README) --
+-- purely an additive, clearly-labeled annotation on top of verified DDInter
+-- data. Never used for strength/risk/coverage calculations.
+CREATE TABLE IF NOT EXISTS predicted_interactions (
+    id           BIGSERIAL PRIMARY KEY,
+    drug_a_num   INTEGER NOT NULL,
+    drug_b_num   INTEGER NOT NULL,
+    confidence   DOUBLE PRECISION NOT NULL,
+    method       TEXT NOT NULL,
+    generated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pred_a ON predicted_interactions(drug_a_num);
+CREATE INDEX IF NOT EXISTS idx_pred_b ON predicted_interactions(drug_b_num);
 
 -- This data is a public, read-only reference dataset with no per-user rows,
 -- so RLS is left disabled and all tables are readable via the anon key.
 -- (Re-enable and add SELECT-only policies later if that changes.)
-ALTER TABLE interactions          DISABLE ROW LEVEL SECURITY;
-ALTER TABLE matching_scores       DISABLE ROW LEVEL SECURITY;
-ALTER TABLE food_interactions     DISABLE ROW LEVEL SECURITY;
-ALTER TABLE disease_interactions  DISABLE ROW LEVEL SECURITY;
-ALTER TABLE side_effects          DISABLE ROW LEVEL SECURITY;
+ALTER TABLE interactions           DISABLE ROW LEVEL SECURITY;
+ALTER TABLE matching_scores        DISABLE ROW LEVEL SECURITY;
+ALTER TABLE food_interactions      DISABLE ROW LEVEL SECURITY;
+ALTER TABLE disease_interactions   DISABLE ROW LEVEL SECURITY;
+ALTER TABLE side_effects           DISABLE ROW LEVEL SECURITY;
+ALTER TABLE predicted_interactions DISABLE ROW LEVEL SECURITY;

@@ -10,6 +10,11 @@ Loads, in order:
   3. drug_food.csv                 -> food_interactions
   4. drug_disease.csv              -> disease_interactions
   5. cid_to_ddinter.csv + Drug_SE_DB/meddra_freq.tsv -> side_effects
+  6. predicted_interactions.csv (backend/ddi_predict/, optional) -> predicted_interactions
+
+Note: side_effects is truncated and reloaded from meddra_freq.tsv every run,
+which wipes any severity scores previously written by score_se_severity.py.
+Re-run score_se_severity.py after re-running this script.
 
 Requires DATABASE_URL in backend/.env (Supabase connection string, transaction
 pooler / port 6543 recommended). See backend/.env.example.
@@ -41,6 +46,7 @@ FOOD_CSV_PATH = BACKEND_DIR / os.environ.get("FOOD_CSV", "drug_food.csv")
 DISEASE_CSV_PATH = BACKEND_DIR / os.environ.get("DISEASE_CSV", "drug_disease.csv")
 MAPPING_CSV_PATH = BACKEND_DIR / "cid_to_ddinter.csv"
 MEDDRA_FREQ_TSV = ROOT_DIR / "Drug_SE_DB" / "meddra_freq.tsv" / "meddra_freq.tsv"
+PREDICTED_CSV_PATH = BACKEND_DIR / os.environ.get("PREDICTED_CSV", "predicted_interactions.csv")
 
 SCHEMA_SQL_PATH = BACKEND_DIR / "schema.sql"
 
@@ -348,6 +354,45 @@ def load_side_effects(conn: psycopg.Connection, mapping_csv: Path, meddra_tsv: P
 
 
 # ---------------------------------------------------------------------------
+# predicted_interactions (offline AI pipeline output, backend/ddi_predict/)
+# ---------------------------------------------------------------------------
+
+def load_predicted_interactions(conn: psycopg.Connection, csv_path: Path) -> None:
+    with conn.cursor() as cur:
+        cur.execute("TRUNCATE predicted_interactions RESTART IDENTITY")
+
+    if not csv_path.exists():
+        print(f"[predicted_interactions] {csv_path} not found, skipping (AI predictions disabled).", file=sys.stderr)
+        return
+
+    print(f"[predicted_interactions] Loading from {csv_path}...")
+    count = 0
+    skipped = 0
+    with conn.cursor() as cur, \
+         open(csv_path, newline="", encoding="utf-8") as f, \
+         cur.copy(
+             "COPY predicted_interactions (drug_a_num, drug_b_num, confidence, method, generated_at) FROM STDIN"
+         ) as copy:
+        for row in csv.DictReader(f):
+            try:
+                num_a = _id_to_num((row.get("drug_a_id") or "").strip())
+                num_b = _id_to_num((row.get("drug_b_id") or "").strip())
+                confidence = float(row.get("confidence") or "")
+            except (ValueError, IndexError):
+                skipped += 1
+                continue
+            copy.write_row((
+                num_a, num_b, confidence,
+                (row.get("method") or "").strip(),
+                (row.get("generated_at") or "").strip(),
+            ))
+            count += 1
+
+    conn.commit()
+    print(f"[predicted_interactions] Loaded {count:,} rows ({skipped:,} skipped).")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -368,6 +413,7 @@ def main() -> None:
         load_food_interactions(conn, FOOD_CSV_PATH)
         load_disease_interactions(conn, DISEASE_CSV_PATH)
         load_side_effects(conn, MAPPING_CSV_PATH, MEDDRA_FREQ_TSV)
+        load_predicted_interactions(conn, PREDICTED_CSV_PATH)
 
     print("\nMigration complete.")
 

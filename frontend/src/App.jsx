@@ -273,6 +273,17 @@ const css = `
     color: var(--blue); border-radius: 4px; padding: 2px 7px; white-space: nowrap;
   }
 
+  .ai-badge {
+    display: inline-block; font-family: var(--mono); font-size: 0.65rem;
+    background: #2a1a08; border: 1px solid #7a4512;
+    color: var(--warn); border-radius: 4px; padding: 2px 7px; white-space: nowrap;
+    cursor: help;
+  }
+  .predicted-legend {
+    display: block; color: var(--warn); font-size: 0.68rem; font-family: var(--mono);
+    margin: 2px 0 8px;
+  }
+
   /* ---- Drug row with popup buttons ---- */
   .drug-row-buttons {
     display: flex; gap: 6px; align-items: center;
@@ -432,6 +443,19 @@ function severityColor(sev) {
   return "#facc15";
 }
 
+// SE severity uses 1–5 scale: trivial / mild / moderate / severe / life-threatening
+function seSeverityColor(sev) {
+  if (sev === 5) return "#f87171";
+  if (sev === 4) return "#fb923c";
+  if (sev === 3) return "#facc15";
+  if (sev === 2) return "#86efac";
+  return "#4ade80";
+}
+
+function seSeverityLabel(sev) {
+  return ["", "Trivial", "Mild", "Moderate", "Severe", "Life-threatening"][sev] ?? null;
+}
+
 function useDebounce(value, delay) {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -492,6 +516,24 @@ function InteractionModal({ drug, type, foodData, diseaseData, seData, onClose }
                   };
                   const displayFreq = (se) =>
                     LABEL_BAR[se.freq_label] ?? (se.freq_lower ?? se.freq_upper ?? 0);
+                  const maxFreq = Math.max(...seItems.map(displayFreq), 0.001);
+                  return seItems.map((se, i) => {
+                    const pct = (displayFreq(se) / maxFreq) * 100;
+                    return (
+                      <div key={i} className="modal-se-item">
+                        <span className="modal-se-name">{se.se_name}</span>
+                        {se.severity != null && (
+                          <span className="severity-badge" style={{ color: seSeverityColor(se.severity) }}>
+                            {seSeverityLabel(se.severity)} ({se.severity}/5)
+                          </span>
+                        )}
+                        <div className="modal-se-bar">
+                          <div className="modal-se-bar-fill" style={{ width: `${pct}%` }} />
+                        </div>
+                        <span className="modal-se-freq">{freqLabel(se)}</span>
+                      </div>
+                    );
+                  });
                   return [
                     <div key="__hdr" className="modal-se-header">
                       <span className="modal-se-header-name">Side Effect</span>
@@ -884,6 +926,57 @@ export default function App() {
                 })}
               </tbody>
             </table>
+
+            {/* Pairwise matching scores */}
+            {result.pair_scores?.length > 0 && (
+              <>
+                <p className="section-title">Pairwise Matching Scores</p>
+                {result.pair_scores.some(ps => ps.is_predicted) && (
+                  <span className="predicted-legend">
+                    ⚠ Rows marked AI-predicted are model-generated and have not been clinically verified.
+                  </span>
+                )}
+                <table className="data-table">
+                  <thead>
+                    <tr><th>Drug Pair</th><th>Mechanism</th><th className="right">Matching Score</th></tr>
+                  </thead>
+                  <tbody>
+                    {result.pair_scores.map((ps, i) => {
+                      const s = ps.score;
+                      const color = s !== null ? scoreColor(s) : "var(--muted)";
+                      return (
+                        <tr key={i}>
+                          <td>
+                            <div className="pair-names">
+                              <span>{ps.drug_a_name}</span>
+                              <span className="pair-sep">↔</span>
+                              <span>{ps.drug_b_name}</span>
+                            </div>
+                          </td>
+                          <td>
+                            {ps.is_predicted
+                              ? <span className="ai-badge" title={ps.advisory}>AI-predicted · {(ps.predicted_confidence * 100).toFixed(0)}%</span>
+                              : ps.mechanism
+                              ? <span className="mech-badge">{ps.mechanism}</span>
+                              : <span className="no-data">—</span>}
+                          </td>
+                          <td className="repl-score-cell">
+                            {s !== null ? (
+                              <div className="bar-wrap">
+                                <div className="bar">
+                                  <div className="bar-fill" style={{ width: `${s * 100}%`, background: color }} />
+                                </div>
+                                <span className="bar-label" style={{ color }}>{(s * 100).toFixed(1)}%</span>
+                              </div>
+                            ) : <span className="no-data">no data</span>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </>
+            )}
 
             {/* Similar replacement suggestions */}
             {result.similar_replacements?.some(group => group.replacements.length > 0) && (
