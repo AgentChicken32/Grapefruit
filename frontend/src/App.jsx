@@ -426,6 +426,34 @@ const css = `
     border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  @media (max-width: 640px) {
+    .app { padding: 32px 16px 60px; }
+
+    /* Theme toggle overlaps the h1 when absolutely positioned at this width -
+       drop it back into normal flow, above the title, instead. */
+    .theme-toggle { position: static; margin-bottom: 16px; }
+
+    /* Explanation text moves onto its own line under the slider, rather than
+       overflowing past the row's right edge. */
+    .se-weight-row { flex-wrap: wrap; row-gap: 6px; }
+    .se-weight-row > span:last-child { flex-basis: 100%; }
+
+    .score-banner { grid-template-columns: 1fr; }
+
+    .actions { flex-wrap: wrap; row-gap: 10px; }
+    .hint { margin-left: 0; flex-basis: 100%; }
+
+    .replacement-group-header { flex-wrap: wrap; row-gap: 6px; }
+    .replacement-group-header .count-badge { margin-left: 0; }
+
+    .drug-row-buttons { flex-wrap: wrap; row-gap: 6px; }
+
+    .data-table th, .data-table td { padding-left: 8px; padding-right: 8px; }
+    .repl-table th, .repl-table td { padding-left: 10px; padding-right: 10px; }
+  }
 `;
 
 function riskColor(val, max) {
@@ -856,7 +884,7 @@ export default function App() {
                 ))}
               </div>
             )}
-            <table className="data-table">
+            <div className="table-scroll"><table className="data-table">
               <thead>
                 <tr>
                   <th>Drug Name</th>
@@ -925,7 +953,7 @@ export default function App() {
                   );
                 })}
               </tbody>
-            </table>
+            </table></div>
 
             {/* Pairwise matching scores */}
             {result.pair_scores?.length > 0 && (
@@ -936,7 +964,7 @@ export default function App() {
                     ⚠ Rows marked AI-predicted are model-generated and have not been clinically verified.
                   </span>
                 )}
-                <table className="data-table">
+                <div className="table-scroll"><table className="data-table">
                   <thead>
                     <tr><th>Drug Pair</th><th>Mechanism</th><th className="right">Matching Score</th></tr>
                   </thead>
@@ -974,7 +1002,7 @@ export default function App() {
                       );
                     })}
                   </tbody>
-                </table>
+                </table></div>
               </>
             )}
 
@@ -998,7 +1026,7 @@ export default function App() {
                         <span className="drug-id-badge">{group.drug_id}</span>
                         <span className="count-badge">{group.replacements.length} similar drug{group.replacements.length !== 1 ? "s" : ""}</span>
                       </div>
-                      {!isCollapsed && <table className="repl-table">
+                      {!isCollapsed && <div className="table-scroll"><table className="repl-table">
                         <thead>
                           <tr>
                             <th>Replacement Drug</th>
@@ -1071,7 +1099,7 @@ export default function App() {
                             );
                           })}
                         </tbody>
-                      </table>}
+                      </table></div>}
                     </div>
                   );
                   })}

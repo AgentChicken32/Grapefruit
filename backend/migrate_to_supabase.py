@@ -405,7 +405,7 @@ def main() -> None:
         )
         sys.exit(1)
 
-    print(f"Connecting to {DATABASE_URL.split('@')[-1]}...")
+    print(f"Connecting to {DATABASE_URL}...")
     with psycopg.connect(DATABASE_URL) as conn:
         apply_schema(conn)
         load_interactions(conn, CSV_PATH)
