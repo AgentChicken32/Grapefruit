@@ -3,56 +3,61 @@ import { useState, useEffect, useRef, useCallback } from "react";
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000/api";
 
 const css = `
-  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Syne:wght@400;500;600;700;800&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Syne:wght@600;700;800&display=swap');
 
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --bg:       #0d0f14;
-    --surface:  #13161e;
-    --border:   #222635;
-    --accent:   #4ade80;
-    --blue:     #60a5fa;
-    --warn:     #fb923c;
-    --danger:   #f87171;
-    --purple:   #c084fc;
-    --muted:    #6b7280;
-    --text:     #e5e7eb;
-    --subtext:  #9ca3af;
-    --radius:   6px;
+    --bg:       #121214;
+    --surface:  #1b1c1f;
+    --border:   #2c2d31;
+    --accent:   #ff6b7a;
+    --info:     #7fb069;
+    --warn:     #ff9f5a;
+    --danger:   #e5484d;
+    --plum:     #c9739b;
+    --muted:    #7a7a80;
+    --text:     #eaeaec;
+    --subtext:  #a3a3a8;
+    --radius:   8px;
     --mono:     'DM Mono', monospace;
-    --sans:     'Syne', sans-serif;
+    --sans:     'Inter', sans-serif;
+    --display:  'Syne', sans-serif;
   }
 
   body.light {
-    --bg:       #f4f6f9;
+    --bg:       #f7f7f8;
     --surface:  #ffffff;
-    --border:   #d1d5db;
-    --accent:   #16a34a;
-    --blue:     #2563eb;
-    --warn:     #ea580c;
-    --danger:   #dc2626;
-    --purple:   #9333ea;
-    --muted:    #6b7280;
-    --text:     #111827;
-    --subtext:  #4b5563;
+    --border:   #e4e4e7;
+    --accent:   #e23b5c;
+    --info:     #4c8c3d;
+    --warn:     #d96b2b;
+    --danger:   #c81e3a;
+    --plum:     #a8477c;
+    --muted:    #86868c;
+    --text:     #1c1c1f;
+    --subtext:  #5c5c62;
   }
-  body.light .header h1 { color: #111827; }
+  body.light .header h1 { color: var(--text); }
   body.light .dropdown { background: #ffffff; }
-  body.light .data-table tr:hover td { background: #f9fafb; }
-  body.light .repl-table tr:hover td { background: #f9fafb; }
-  body.light .replacement-group-header { background: #f3f4f6; }
-  body.light .repl-table th { background: #f3f4f6; }
-  body.light .score-card.primary { background: #f0fdf4; }
+  body.light .data-table tr:hover td { background: #f7f7f8; }
+  body.light .repl-table tr:hover td { background: #f7f7f8; }
+  body.light .replacement-group-header { background: #f0f0f2; }
+  body.light .repl-table th { background: #f0f0f2; }
+  body.light .score-card.primary { background: var(--surface); }
 
   body { background: var(--bg); color: var(--text); font-family: var(--sans); min-height: 100vh; transition: background 0.2s, color 0.2s; }
 
   .app { max-width: 860px; margin: 0 auto; padding: 48px 24px 80px; }
 
   .header { margin-bottom: 48px; position: relative; }
-  .header h1 { font-size: 2rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1.1; color: #fff; }
-  .header h1 span { color: var(--accent); }
-  .header p { margin-top: 8px; color: var(--subtext); font-size: 0.875rem; font-family: var(--mono); }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .brand-logo { flex-shrink: 0; filter: drop-shadow(0 2px 10px rgba(255, 107, 122, 0.25)); }
+  .header h1 {
+    font-family: var(--display); font-size: 2rem; font-weight: 800;
+    letter-spacing: -0.03em; line-height: 1.1; color: var(--text);
+  }
+  .header p.tagline { margin-top: 10px; color: var(--subtext); font-size: 0.875rem; font-family: var(--mono); }
 
   .theme-toggle {
     position: absolute; top: 0; right: 0;
@@ -100,13 +105,13 @@ const css = `
 
   .tag {
     display: inline-flex; align-items: center; gap: 6px;
-    background: #1a2e1a; border: 1px solid #2d5a2d; color: var(--accent);
+    background: #3a1620; border: 1px solid #5c2430; color: var(--accent);
     font-family: var(--mono); font-size: 0.75rem; border-radius: 4px; padding: 4px 8px;
     animation: tagIn 0.15s ease;
   }
   @keyframes tagIn { from { transform: scale(0.85); opacity: 0; } to { transform: scale(1); opacity: 1; } }
   .tag button {
-    background: none; border: none; cursor: pointer; color: #4b7c4b;
+    background: none; border: none; cursor: pointer; color: #a85f6c;
     font-size: 0.9rem; line-height: 1; padding: 0; display: flex; align-items: center;
     transition: color 0.1s;
   }
@@ -120,14 +125,14 @@ const css = `
 
   .dropdown {
     position: absolute; top: calc(100% + 4px); left: 0; right: 0;
-    background: #191c26; border: 1px solid var(--border); border-radius: var(--radius);
+    background: #1f2023; border: 1px solid var(--border); border-radius: var(--radius);
     z-index: 100; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.5);
   }
   .dropdown-item {
     display: flex; justify-content: space-between; align-items: center;
     padding: 10px 14px; cursor: pointer; transition: background 0.1s; font-size: 0.875rem;
   }
-  .dropdown-item:hover, .dropdown-item.active { background: #222635; }
+  .dropdown-item:hover, .dropdown-item.active { background: #2a2b2f; }
   .dropdown-item .drug-name { font-weight: 600; }
   .dropdown-item .drug-id { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
 
@@ -137,7 +142,7 @@ const css = `
     letter-spacing: 0.06em; text-transform: uppercase; border: none;
     border-radius: var(--radius); padding: 10px 20px; cursor: pointer; transition: all 0.15s;
   }
-  .btn-primary { background: var(--accent); color: #0a1a0a; }
+  .btn-primary { background: var(--accent); color: #2e0a10; }
   .btn-primary:hover:not(:disabled) { filter: brightness(1.1); transform: translateY(-1px); }
   .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--border); }
@@ -156,7 +161,7 @@ const css = `
 
   .score-banner { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-bottom: 24px; }
   .score-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; }
-  .score-card.primary { border-color: var(--accent); background: #0d1f0d; }
+  .score-card.primary { border-color: var(--accent); background: var(--surface); }
   .score-card label { font-family: var(--sans); font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--subtext); display: block; margin-bottom: 10px; }
   .score-card .value { font-family: var(--mono); font-size: 1.75rem; font-weight: 500; line-height: 1; color: var(--accent); letter-spacing: -0.02em; }
   .score-card.primary .value { font-size: 2.2rem; }
@@ -203,7 +208,7 @@ const css = `
   .data-table th.right { text-align: right; }
   .data-table td { padding: 11px 12px; border-bottom: 1px solid var(--border); font-size: 0.875rem; }
   .data-table tr:last-child td { border-bottom: none; }
-  .data-table tr:hover td { background: #15181f; }
+  .data-table tr:hover td { background: #232427; }
 
   .drug-id-cell { font-family: var(--mono); font-size: 0.75rem; color: var(--muted); }
   .drug-name-cell { font-weight: 600; }
@@ -228,10 +233,10 @@ const css = `
   }
   .replacement-group-header {
     display: flex; align-items: center; gap: 10px;
-    padding: 12px 16px; background: #0f1218; border-bottom: 1px solid var(--border);
+    padding: 12px 16px; background: #1f2023; border-bottom: 1px solid var(--border);
     cursor: pointer; user-select: none;
   }
-  .replacement-group-header:hover { background: #141720; }
+  .replacement-group-header:hover { background: #26272b; }
   .replacement-group-header .drug-label { font-weight: 700; font-size: 0.9rem; color: var(--text); }
   .replacement-group-header .drug-id-badge {
     font-family: var(--mono); font-size: 0.68rem; color: var(--muted);
@@ -239,7 +244,7 @@ const css = `
   }
   .replacement-group-header .count-badge {
     margin-left: auto; font-family: var(--mono); font-size: 0.68rem;
-    color: var(--blue); background: #0d1a2e; border: 1px solid #1e3a5f;
+    color: var(--info); background: #16240f; border: 1px solid #355c1e;
     border-radius: 99px; padding: 2px 8px;
   }
   .replacement-group-header .collapse-caret {
@@ -256,12 +261,12 @@ const css = `
   .repl-table th {
     font-family: var(--mono); font-size: 0.62rem; text-transform: uppercase;
     letter-spacing: 0.09em; color: var(--muted); text-align: left;
-    padding: 7px 16px; border-bottom: 1px solid var(--border); background: #0f1218;
+    padding: 7px 16px; border-bottom: 1px solid var(--border); background: #1f2023;
   }
   .repl-table th.right { text-align: right; }
   .repl-table td { padding: 10px 16px; border-bottom: 1px solid var(--border); font-size: 0.85rem; }
   .repl-table tr:last-child td { border-bottom: none; }
-  .repl-table tr:hover td { background: #15181f; }
+  .repl-table tr:hover td { background: #232427; }
   .repl-name { font-weight: 600; }
   .repl-id { font-family: var(--mono); font-size: 0.7rem; color: var(--muted); }
   .repl-count { font-family: var(--mono); font-size: 0.8rem; color: var(--subtext); text-align: right; }
@@ -269,8 +274,8 @@ const css = `
 
   .mech-badge {
     display: inline-block; font-family: var(--mono); font-size: 0.65rem;
-    background: #0d1a2e; border: 1px solid #1e3a5f;
-    color: var(--blue); border-radius: 4px; padding: 2px 7px; white-space: nowrap;
+    background: #16240f; border: 1px solid #355c1e;
+    color: var(--info); border-radius: 4px; padding: 2px 7px; white-space: nowrap;
   }
 
   .ai-badge {
@@ -301,16 +306,16 @@ const css = `
     background: #2a1a08; border-color: var(--warn);
   }
   .btn-pill.disease {
-    color: var(--purple); border-color: #5a2a7a;
+    color: var(--plum); border-color: #5c2a45;
   }
   .btn-pill.disease:hover, .btn-pill.disease.active {
-    background: #1e0f2e; border-color: var(--purple);
+    background: #2a1420; border-color: var(--plum);
   }
   .btn-pill.side-effects {
-    color: var(--blue); border-color: #1e3a5f;
+    color: var(--info); border-color: #355c1e;
   }
   .btn-pill.side-effects:hover, .btn-pill.side-effects.active {
-    background: #0d1a2e; border-color: var(--blue);
+    background: #16240f; border-color: var(--info);
   }
   .btn-pill.none-badge {
     color: var(--muted); border-color: var(--border); cursor: default; opacity: 0.5;
@@ -372,7 +377,7 @@ const css = `
   .modal-item-desc { font-size: 0.8rem; color: var(--subtext); line-height: 1.5; margin-bottom: 5px; }
   .modal-item-mgmt { font-size: 0.8rem; color: var(--text); line-height: 1.5; }
   .modal-item-mgmt strong {
-    color: var(--blue); font-weight: 600; text-transform: uppercase;
+    color: var(--info); font-weight: 600; text-transform: uppercase;
     font-size: 0.65rem; letter-spacing: 0.06em; margin-right: 6px;
   }
 
@@ -402,7 +407,7 @@ const css = `
   .modal-se-name { flex: 1; font-size: 0.85rem; font-weight: 500; }
   .modal-se-freq { font-family: var(--mono); font-size: 0.72rem; color: var(--subtext); white-space: nowrap; min-width: 70px; text-align: right; }
   .modal-se-bar { width: 80px; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; flex-shrink: 0; }
-  .modal-se-bar-fill { height: 100%; border-radius: 2px; background: var(--blue); }
+  .modal-se-bar-fill { height: 100%; border-radius: 2px; background: var(--info); }
 
   .modal-empty {
     padding: 32px 20px; font-family: var(--mono); font-size: 0.8rem;
@@ -410,14 +415,14 @@ const css = `
   }
 
   .unknown-box {
-    margin-top: 16px; background: #1f1210; border: 1px solid #4a1a1a;
+    margin-top: 16px; background: #2a1214; border: 1px solid #5c1f26;
     border-radius: var(--radius); padding: 12px 16px;
     font-family: var(--mono); font-size: 0.75rem; color: var(--danger);
   }
   .unknown-box strong { display: block; margin-bottom: 4px; }
 
   .error-box {
-    background: #1f1210; border: 1px solid #4a1a1a; border-radius: var(--radius);
+    background: #2a1214; border: 1px solid #5c1f26; border-radius: var(--radius);
     padding: 16px 20px; font-family: var(--mono); font-size: 0.8rem; color: var(--danger); margin-top: 24px;
   }
   .loading { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 0.8rem; color: var(--muted); margin-top: 24px; }
@@ -484,6 +489,31 @@ function seSeverityLabel(sev) {
   return ["", "Trivial", "Mild", "Moderate", "Severe", "Life-threatening"][sev] ?? null;
 }
 
+// Grapefruit wordmark icon — a stylized citrus cross-section.
+function GrapefruitLogo({ size = 32 }) {
+  return (
+    <svg
+      className="brand-logo"
+      width={size} height={size} viewBox="0 0 40 40"
+      xmlns="http://www.w3.org/2000/svg" aria-hidden="true"
+    >
+      <circle cx="20" cy="20" r="19" fill="#7fb069" />
+      <circle cx="20" cy="20" r="16" fill="#fff3ea" />
+      <circle cx="20" cy="20" r="14" fill="#ff6b7a" />
+      <circle cx="20" cy="20" r="14" fill="none" stroke="#e23b5c" strokeWidth="0.75" opacity="0.5" />
+      <g stroke="#fff3ea" strokeWidth="1.3" strokeLinecap="round" opacity="0.9">
+        <line x1="20" y1="6.5" x2="20" y2="33.5" />
+        <line x1="6.5" y1="20" x2="33.5" y2="20" />
+        <line x1="10.2" y1="10.2" x2="29.8" y2="29.8" />
+        <line x1="29.8" y1="10.2" x2="10.2" y2="29.8" />
+      </g>
+      <ellipse cx="20" cy="14.5" rx="1.1" ry="1.6" fill="#fff3ea" opacity="0.85" />
+      <ellipse cx="24.7" cy="21.5" rx="1.1" ry="1.6" fill="#fff3ea" opacity="0.85" transform="rotate(50 24.7 21.5)" />
+      <ellipse cx="15.3" cy="24" rx="1.1" ry="1.6" fill="#fff3ea" opacity="0.85" transform="rotate(-40 15.3 24)" />
+    </svg>
+  );
+}
+
 function useDebounce(value, delay) {
   const [debounced, setDebounced] = useState(value);
   useEffect(() => {
@@ -505,7 +535,7 @@ function InteractionModal({ drug, type, foodData, diseaseData, seData, onClose }
   const isFood    = type === "food";
   const isDisease = type === "disease";
 
-  const accentColor = isFood ? "var(--warn)" : isDisease ? "var(--purple)" : "var(--blue)";
+  const accentColor = isFood ? "var(--warn)" : isDisease ? "var(--plum)" : "var(--info)";
   const icon        = isFood ? "🍽️" : isDisease ? "🩺" : "💊";
   const title       = isFood ? "Food Interactions" : isDisease ? "Disease Interactions" : "Side Effects";
 
@@ -754,8 +784,11 @@ export default function App() {
             <span className="toggle-track"><span className="toggle-thumb" /></span>
             {darkMode ? "Dark" : "Light"}
           </button>
-          <h1>Drug Regime<br /><span>Risk Scorer</span></h1>
-          <p>Add drugs to a regime and assess interaction risk</p>
+          <div className="brand">
+            <GrapefruitLogo size={34} />
+            <h1>Grapefruit</h1>
+          </div>
+          <p className="tagline">Drug regime interaction &amp; risk scoring</p>
           <div className="se-weight-row">
             <label>Method 1 weight</label>
             <input
@@ -1009,7 +1042,7 @@ export default function App() {
             {/* Similar replacement suggestions */}
             {result.similar_replacements?.some(group => group.replacements.length > 0) && (
               <>
-                <p className="section-title">Similar Drug Replacements <span style={{color:"var(--blue)",marginLeft:6,fontSize:"0.65rem",fontFamily:"var(--mono)"}}>(match score &gt; {(similarityCutoff * 100).toFixed(0)}%)</span></p>
+                <p className="section-title">Similar Drug Replacements <span style={{color:"var(--info)",marginLeft:6,fontSize:"0.65rem",fontFamily:"var(--mono)"}}>(match score &gt; {(similarityCutoff * 100).toFixed(0)}%)</span></p>
                 <div className="replacements-grid">
                   {result.similar_replacements.filter(group => group.replacements.length > 0).map(group => {
                     const isCollapsed = collapsedGroups.has(group.drug_id);
